@@ -1,319 +1,198 @@
-// Vehicles v3: cars, bus, van, motorbikes, traffic AI, stealing, driving.
-// Traffic cars stay on the road grid and turn at intersections; the player
-// can steal any of them with E, and every stolen car raises the wanted
-// heat. Wet roads (rain) cut grip: slower acceleration, lazier steering.
-// At night the headlights throw two cones ahead of the car.
+// Vehicles: eight types with their own handling, the traffic that drives the
+// road grid, and stealing. A car is a small physics body (position, heading,
+// speed) with arcade steering; traffic cars follow routes across intersections.
+import { CFG } from './config.js';
+import { findRoute, nearestIntersection, resolveCircle } from './citymap.js';
+import { gripFactor } from './weather.js';
 
-import { clamp, angleDiff, dist2 } from './rng.js';
-import { collideBuildings, roadAxis, randomRoadPoint, WORLD } from './citymap.js';
-import { addHeat } from './police.js';
-import { isWet } from './weather.js';
-
-export const VEHICLE_TYPES = {
-  sedan:  { w: 46, h: 22, top: 400, accel: 300, color: '#c94f4f' },
-  taxi:   { w: 46, h: 22, top: 380, accel: 290, color: '#f2c230' },
-  truck:  { w: 62, h: 26, top: 320, accel: 220, color: '#7d8a99' },
-  sport:  { w: 48, h: 22, top: 480, accel: 380, color: '#39d5ff' },
-  bike:   { w: 34, h: 12, top: 460, accel: 360, color: '#ff4fd8' },
-  van:    { w: 56, h: 24, top: 340, accel: 240, color: '#b8a24f' },
-  bus:    { w: 86, h: 28, top: 280, accel: 170, color: '#e8a13c' },
+export const CAR_TYPES = {
+  sedan: { len: 48, wid: 22, accel: 300, top: 430, turn: 2.7, brake: 520, name: 'Sedan' },
+  taxi: { len: 48, wid: 22, accel: 290, top: 410, turn: 2.7, brake: 520, name: 'Taxi' },
+  sports: { len: 50, wid: 22, accel: 410, top: 580, turn: 3.3, brake: 620, name: 'Sports', spoiler: true },
+  van: { len: 58, wid: 24, accel: 220, top: 340, turn: 2.2, brake: 460, name: 'Van' },
+  bus: { len: 78, wid: 26, accel: 160, top: 290, turn: 1.8, brake: 420, name: 'Bus' },
+  bike: { len: 32, wid: 13, accel: 450, top: 540, turn: 3.7, brake: 700, name: 'Motorbike' },
+  cruiser: { len: 50, wid: 22, accel: 360, top: 540, turn: 3.1, brake: 640, name: 'Police Cruiser', police: true },
+  interceptor: { len: 52, wid: 22, accel: 480, top: 660, turn: 3.5, brake: 700, name: 'Interceptor', police: true, spoiler: true },
 };
-const TRAFFIC_COLORS = ['#c94f4f', '#4f7dc9', '#e8e8e8', '#3a3f4a', '#7dc94f', '#c9a24f', '#8e44ad', '#b8bcc4'];
-const TRAFFIC_KINDS = ['sedan', 'sedan', 'sedan', 'taxi', 'truck', 'sport', 'van', 'van', 'bus'];
 
-export function makeVehicle(rng, kind, x, y, angle) {
-  const t = VEHICLE_TYPES[kind];
-  const color = kind === 'taxi' ? '#f2c230' : kind === 'bus' ? '#e8a13c' : rng.pick(TRAFFIC_COLORS);
+const PAINT = ['#c0392b', '#2e86c1', '#e67e22', '#7d3c98', '#16a085', '#b7950b', '#5d6d7e', '#a93226'];
+
+let nextCarId = 1;
+
+export function makeCar(type, x, y, angle, driver, rng) {
+  const t = CAR_TYPES[type];
   return {
-    kind, x, y, angle, speed: 0, hp: 100,
-    w: t.w, h: t.h, top: t.top, accel: t.accel,
-    color,
-    driver: 'traffic', axis: 'v', dir: 1, lane: 18,
-    stuck: 0, honk: 0,
+    id: nextCarId,
+    type,
+    name: t.name,
+    x, y, angle,
+    speed: 0,
+    len: t.len,
+    wid: t.wid,
+    color: type === 'taxi' ? '#f1c40f' : type === 'cruiser' ? '#1a1a2e' : type === 'interceptor' ? '#111122' : rng.pick(PAINT),
+    driver: driver || 'traffic',
+    route: null,
+    routeIdx: 0,
+    wait: 0,
+    health: 100,
+    stuck: 0,
   };
 }
 
-export function spawnTraffic(state) {
-  const { rng, city } = state;
-  state.vehicles = [];
-  for (let i = 0; i < 26; i++) {
-    const p = randomRoadPoint(city, rng);
-    const axis = rng.chance(0.5) ? 'v' : 'h';
-    const dir = rng.chance(0.5) ? 1 : -1;
-    const v = makeVehicle(rng, rng.pick(TRAFFIC_KINDS), p.x, p.y, axis === 'v' ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (dir > 0 ? 0 : Math.PI));
-    v.axis = axis; v.dir = dir;
-    if (axis === 'v') v.x = Math.round(p.x / 400) * 400 + dir * 18;
-    else v.y = Math.round(p.y / 400) * 400 + dir * 18;
-    v.speed = rng.range(80, 140);
-    state.vehicles.push(v);
-  }
-  // Parked cars, a van, a city bus and two motorbikes waiting to be borrowed.
-  for (let i = 0; i < 6; i++) {
-    const p = randomRoadPoint(city, rng);
-    const v = makeVehicle(rng, 'sedan', p.x + rng.range(-40, 40), p.y + rng.range(-40, 40), rng.angle());
-    v.driver = null; v.speed = 0;
-    state.vehicles.push(v);
-  }
-  const vanSpot = randomRoadPoint(city, rng, 'market');
-  const van = makeVehicle(rng, 'van', vanSpot.x, vanSpot.y, rng.angle());
-  van.driver = null; van.speed = 0;
-  state.vehicles.push(van);
-  const busSpot = randomRoadPoint(city, rng, 'downtown');
-  const bus = makeVehicle(rng, 'bus', busSpot.x, busSpot.y, rng.angle());
-  bus.driver = null; bus.speed = 0;
-  state.vehicles.push(bus);
-  for (let i = 0; i < 2; i++) {
-    const p = randomRoadPoint(city, rng, 'downtown');
-    const v = makeVehicle(rng, 'bike', p.x, p.y, rng.angle());
-    v.driver = null; v.speed = 0;
-    state.vehicles.push(v);
+export function resetCarIds() {
+  nextCarId = 1;
+}
+
+// Scatter traffic across the road grid, each car with a route to follow.
+export function spawnTraffic(state, count) {
+  const { city, rng } = state;
+  for (let i = 0; i < count; i += 1) {
+    const x = rng.pick(city.xs) + rng.range(-6, 6);
+    const y = rng.pick(city.ys) + rng.range(-6, 6);
+    const type = rng.pick(['sedan', 'sedan', 'taxi', 'sports', 'van', 'bus', 'bike']);
+    const car = makeCar(type, x, y, rng.pick([0, Math.PI / 2, Math.PI, -Math.PI / 2]), 'traffic', rng);
+    const tx = rng.pick(city.xs);
+    const ty = rng.pick(city.ys);
+    car.route = findRoute(city, x, y, tx, ty);
+    car.routeIdx = 1;
+    car.speed = rng.range(120, 200);
+    state.cars.push(car);
   }
 }
 
-function nearestAhead(state, v, range) {
-  const fx = Math.cos(v.angle), fy = Math.sin(v.angle);
-  let best = null;
-  for (const o of state.vehicles) {
-    if (o === v) continue;
-    const dx = o.x - v.x, dy = o.y - v.y;
-    const along = dx * fx + dy * fy;
-    if (along > 0 && along < range && Math.abs(-dx * fy + dy * fx) < 34) {
-      if (!best || along < best.along) best = { v: o, along };
-    }
+// Drive one car one step: acceleration, steering, friction, building collision.
+export function driveCar(state, car, dt, throttle, steer) {
+  const t = CAR_TYPES[car.type];
+  const grip = gripFactor(state.weather);
+  if (throttle > 0) car.speed += t.accel * grip * throttle * dt;
+  else if (throttle < 0) car.speed += t.brake * throttle * dt;
+  else car.speed -= Math.sign(car.speed) * 140 * dt;
+  if (Math.abs(car.speed) < 4 && throttle === 0) car.speed = 0;
+  car.speed = Math.max(-t.top * 0.35, Math.min(t.top, car.speed));
+  const turnRate = t.turn * grip * Math.sign(car.speed) * Math.min(1, Math.abs(car.speed) / 120 + 0.25);
+  car.angle += steer * turnRate * dt;
+  const nx = car.x + Math.cos(car.angle) * car.speed * dt;
+  const ny = car.y + Math.sin(car.angle) * car.speed * dt;
+  const fixed = resolveCircle(state.city, nx, ny, car.len * 0.42);
+  if (Math.abs(fixed.x - nx) > 0.5 || Math.abs(fixed.y - ny) > 0.5) {
+    // A hard hit on a building: lose speed and spark.
+    if (Math.abs(car.speed) > 240) state.particles.push({ x: nx, y: ny, vx: 0, vy: 0, life: 0.5, max: 0.5, color: '#ffd34d', r: 6 });
+    car.speed *= 0.45;
   }
-  return best;
+  car.x = fixed.x;
+  car.y = fixed.y;
 }
 
+// Traffic AI: follow the route, one intersection at a time, pausing at red lights
+// that exist only in the driver's head — a short random wait at each corner.
 export function updateTraffic(state, dt) {
-  const wet = isWet(state);
-  for (const v of state.vehicles) {
-    if (v.driver !== 'traffic') continue;
-    // Slow down for the car ahead; slower still on wet roads.
-    const ahead = nearestAhead(state, v, 110);
-    const cruise = v.top * (wet ? 0.32 : 0.38);
-    const target = ahead ? Math.max(0, ahead.v.speed - 20) : cruise;
-    v.speed += clamp(target - v.speed, -260 * dt, 160 * dt);
-    const step = v.speed * dt;
-    if (v.axis === 'v') v.y += v.dir * step; else v.x += v.dir * step;
-    // At an intersection, sometimes turn onto the cross road.
-    const nearX = Math.abs(v.x % 400) < 26 || Math.abs(v.x % 400) > 374;
-    const nearY = Math.abs(v.y % 400) < 26 || Math.abs(v.y % 400) > 374;
-    if (nearX && nearY && state.rng.chance(dt * 0.55)) {
-      if (v.axis === 'v') {
-        v.axis = 'h'; v.dir = state.rng.chance(0.5) ? 1 : -1;
-        v.y = Math.round(v.y / 400) * 400 + v.dir * 18;
-        v.angle = v.dir > 0 ? 0 : Math.PI;
-      } else {
-        v.axis = 'v'; v.dir = state.rng.chance(0.5) ? 1 : -1;
-        v.x = Math.round(v.x / 400) * 400 + v.dir * 18;
-        v.angle = v.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+  for (const car of state.cars) {
+    if (car.driver !== 'traffic') continue;
+    if (car.parked) continue;
+    if (car.wait > 0) {
+      car.wait -= dt;
+      car.speed *= 0.9;
+      continue;
+    }
+    if (!car.route || car.routeIdx >= car.route.length) {
+      const tx = state.rng.pick(state.city.xs);
+      const ty = state.rng.pick(state.city.ys);
+      car.route = findRoute(state.city, car.x, car.y, tx, ty);
+      car.routeIdx = 1;
+      continue;
+    }
+    const target = car.route[car.routeIdx];
+    const dx = target.x - car.x;
+    const dy = target.y - car.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 14) {
+      car.routeIdx += 1;
+      if (state.rng.chance(0.25)) car.wait = state.rng.range(0.5, 1.6);
+      continue;
+    }
+    const want = Math.atan2(dy, dx);
+    let diff = want - car.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const steer = Math.max(-1, Math.min(1, diff * 2.2));
+    const cruise = CAR_TYPES[car.type].top * 0.5;
+    const throttle = car.speed < cruise ? 1 : 0;
+    driveCar(state, car, dt, throttle, steer);
+    // Keep a gap from the car ahead: slow down when something is close in front.
+    for (const other of state.cars) {
+      if (other === car) continue;
+      const ox = other.x - car.x;
+      const oy = other.y - car.y;
+      const ahead = ox * Math.cos(car.angle) + oy * Math.sin(car.angle);
+      const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
+      if (ahead > 0 && ahead < 70 && side < 26) {
+        car.speed *= 0.92;
+        break;
       }
     }
-    // Wrap around the world edges so traffic never runs out.
-    if (v.x < 200) { v.x = 200; v.dir = 1; }
-    if (v.x > WORLD - 200) { v.x = WORLD - 200; v.dir = -1; }
-    if (v.y < 200) { v.y = 200; v.dir = 1; }
-    if (v.y > WORLD - 200) { v.y = WORLD - 200; v.dir = -1; }
-    v.x = clamp(v.x, 120, WORLD - 120); v.y = clamp(v.y, 120, WORLD - 120);
+  }
+  // Gentle separation so traffic does not stack on one spot.
+  for (let i = 0; i < state.cars.length; i += 1) {
+    for (let j = i + 1; j < state.cars.length; j += 1) {
+      const a = state.cars[i];
+      const b = state.cars[j];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const d = Math.hypot(dx, dy);
+      const min = (a.len + b.len) / 2 - 8;
+      if (d > 0.01 && d < min) {
+        const push = (min - d) / 2;
+        const ux = dx / d;
+        const uy = dy / d;
+        a.x -= ux * push;
+        a.y -= uy * push;
+        b.x += ux * push;
+        b.y += uy * push;
+      }
+    }
   }
 }
 
-export function nearestVehicle(state, x, y, maxD) {
-  let best = null, bestD = maxD * maxD;
-  for (const v of state.vehicles) {
-    if (v.hp <= 0) continue;
-    const d = dist2(x, y, v.x, v.y);
-    if (d < bestD) { bestD = d; best = v; }
+// The nearest car the player could steal, or null.
+export function nearestCar(state, x, y, maxD) {
+  let best = null;
+  let bestD = maxD;
+  for (const car of state.cars) {
+    if (car.driver === 'police') continue;
+    const d = Math.hypot(car.x - x, car.y - y);
+    if (d < bestD) {
+      bestD = d;
+      best = car;
+    }
   }
   return best;
 }
 
-export function tryEnterVehicle(state) {
-  const p = state.player;
-  if (p.vehicle) return false;
-  const v = nearestVehicle(state, p.x, p.y, 70);
-  if (!v) return false;
-  if (v.driver === 'traffic') {
-    // Yank the driver out: they flee on foot, and the law notices.
-    state.peds.push({
-      x: v.x + 30, y: v.y + 30, angle: state.rng.angle(), speed: 130,
-      color: '#e8b04d', mode: 'flee', down: 0, panic: 3, kind: 'local', target: null,
-    });
-    v.driver = 'player';
-    addHeat(state, 1);
-    state.audio.sfx('steal');
-    state.hudFlash = v.kind === 'bus' ? 'Bus jacked! A whole busload of witnesses called it in.'
-      : 'Car jacked! The driver ran off — the cops noticed.';
-  } else {
-    v.driver = 'player';
-    addHeat(state, 0.6);
-    state.audio.sfx('door');
-  }
-  p.vehicle = v;
-  p.x = v.x; p.y = v.y;
+// Steal the nearest car: the player gets in, the car becomes theirs.
+export function stealCar(state) {
+  const car = nearestCar(state, state.player.x, state.player.y, 64);
+  if (!car) return false;
+  car.driver = 'player';
+  car.parked = false;
+  state.player.car = car;
+  state.player.x = car.x;
+  state.player.y = car.y;
+  state.player.angle = car.angle;
   return true;
 }
 
-export function exitVehicle(state) {
-  const p = state.player;
-  if (!p.vehicle) return;
-  const v = p.vehicle;
-  v.driver = null; v.speed = 0;
-  p.vehicle = null;
-  p.x = v.x + Math.cos(v.angle + Math.PI / 2) * 44;
-  p.y = v.y + Math.sin(v.angle + Math.PI / 2) * 44;
-  p.angle = v.angle;
-  state.audio.sfx('door');
-}
-
-export function updatePlayerDriving(state, dt) {
-  const p = state.player, v = p.vehicle;
-  if (!v) return;
-  const k = state.input.keys;
-  const up = k.has('KeyW') || k.has('ArrowUp');
-  const down = k.has('KeyS') || k.has('ArrowDown');
-  const left = k.has('KeyA') || k.has('ArrowLeft');
-  const right = k.has('KeyD') || k.has('ArrowRight');
-  const handbrake = k.has('Space');
-  const wet = isWet(state);
-  const grip = wet ? 0.9 : 1;
-
-  const accel = v.accel * (wet ? 0.92 : 1);
-  if (up) v.speed += accel * dt;
-  else if (down) v.speed -= accel * 0.8 * dt;
-  else v.speed -= Math.sign(v.speed) * 130 * dt;
-  if (handbrake) v.speed -= Math.sign(v.speed) * 420 * dt;
-  v.speed = clamp(v.speed, -v.top * 0.45, v.top);
-
-  const steer = (left ? -1 : 0) + (right ? 1 : 0);
-  const turnRate = 2.1 * clamp(Math.abs(v.speed) / 180, 0, 1) * Math.sign(v.speed || 1) * grip;
-  v.angle += steer * turnRate * dt * (handbrake ? 1.5 : 1);
-  if (handbrake && Math.abs(v.speed) > 120 && steer !== 0) {
-    state.skids.push({ x: v.x, y: v.y, angle: v.angle, life: 1.6 });
-    state.smoke.push({ x: v.x - Math.cos(v.angle) * v.w / 2, y: v.y - Math.sin(v.angle) * v.w / 2, life: 0.9, r: 12 });
-  }
-
-  const nx = v.x + Math.cos(v.angle) * v.speed * dt;
-  const ny = v.y + Math.sin(v.angle) * v.speed * dt;
-  const probe = { x: nx, y: ny };
-  const hitWall = collideBuildings(state.city, probe, v.w / 2 - 4);
-  if (hitWall) {
-    v.speed *= -0.25;
-    state.audio.sfx('crash');
-    state.shake = Math.min(10, state.shake + 5);
-    state.particles.push({ x: v.x, y: v.y, kind: 'spark', life: 0.35, n: 8 });
-    if (Math.abs(v.speed) > 90) addHeat(state, 0.2);
-  } else {
-    v.x = nx; v.y = ny;
-  }
-  // Bumping into traffic: shove the other car aside, keep most of our speed.
-  for (const o of state.vehicles) {
-    if (o === v || o.hp <= 0) continue;
-    const d2 = dist2(v.x, v.y, o.x, o.y);
-    if (d2 < 46 * 46) {
-      const d = Math.sqrt(d2) || 1;
-      const push = (46 - d) * 0.35;
-      o.x += ((o.x - v.x) / d) * push; o.y += ((o.y - v.y) / d) * push;
-      o.speed = Math.max(o.speed, v.speed * 0.85);
-      v.speed *= 0.94;
-      if (state.time - (v.lastBump || -9) > 0.6) {
-        v.lastBump = state.time;
-        state.audio.sfx('crash');
-        state.shake = Math.min(10, state.shake + 3);
-        addHeat(state, 0.1);
-      }
-    }
-  }
-  v.x = clamp(v.x, 90, WORLD - 90); v.y = clamp(v.y, 90, WORLD - 90);
-  p.x = v.x; p.y = v.y; p.angle = v.angle;
-  state.audio.engine(Math.abs(v.speed) / v.top, v.kind === 'bike');
-}
-
-function drawHeadlights(ctx, v) {
-  // Two beams plus a soft halo at the nose.
-  for (const off of [-7, 7]) {
-    const g = ctx.createRadialGradient(v.w / 2 + 60, off, 4, v.w / 2 + 60, off, 110);
-    g.addColorStop(0, 'rgba(255,240,180,0.6)'); g.addColorStop(1, 'rgba(255,240,180,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.moveTo(v.w / 2, off - 4); ctx.lineTo(v.w / 2 + 130, off - 30); ctx.lineTo(v.w / 2 + 130, off + 30); ctx.lineTo(v.w / 2, off + 4); ctx.closePath(); ctx.fill();
-  }
-  ctx.fillStyle = 'rgba(255,244,190,0.9)';
-  ctx.fillRect(v.w / 2 - 2, -9, 4, 4);
-  ctx.fillRect(v.w / 2 - 2, 5, 4, 4);
-}
-
-function drawOneVehicle(ctx, v, night, time) {
-  ctx.save();
-  ctx.translate(v.x, v.y);
-  ctx.rotate(v.angle);
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.fillRect(-v.w / 2 + 4, -v.h / 2 + 5, v.w, v.h);
-  if (v.kind === 'bike') {
-    ctx.fillStyle = v.color;
-    ctx.fillRect(-v.w / 2, -v.h / 2, v.w, v.h);
-    ctx.fillStyle = '#222';
-    ctx.beginPath(); ctx.arc(-v.w / 2 + 4, 0, 5, 0, Math.PI * 2); ctx.arc(v.w / 2 - 4, 0, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#e8b04d';
-    ctx.beginPath(); ctx.arc(-2, 0, 5, 0, Math.PI * 2); ctx.fill();
-  } else if (v.kind === 'bus') {
-    ctx.fillStyle = v.color;
-    ctx.beginPath(); ctx.roundRect(-v.w / 2, -v.h / 2, v.w, v.h, 8); ctx.fill();
-    ctx.fillStyle = '#1c2733';
-    for (let i = 0; i < 5; i++) ctx.fillRect(-v.w / 2 + 8 + i * 15, -v.h / 2 + 4, 11, v.h - 8);
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillRect(-v.w / 2 + 6, -v.h / 2 + 3, v.w - 12, 3);
-    ctx.fillStyle = '#111'; ctx.font = 'bold 9px system-ui, sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('CITY BUS', 0, 3);
-    ctx.fillStyle = '#111';
-    ctx.fillRect(-v.w / 2 + 4, -v.h / 2 - 2, 9, 4); ctx.fillRect(-v.w / 2 + 4, v.h / 2 - 2, 9, 4);
-    ctx.fillRect(v.w / 2 - 13, -v.h / 2 - 2, 9, 4); ctx.fillRect(v.w / 2 - 13, v.h / 2 - 2, 9, 4);
-  } else if (v.kind === 'van') {
-    ctx.fillStyle = v.color;
-    ctx.beginPath(); ctx.roundRect(-v.w / 2, -v.h / 2, v.w, v.h, 7); ctx.fill();
-    ctx.fillStyle = '#1c2733';
-    ctx.fillRect(-v.w / 6, -v.h / 2 + 3, v.w / 4, v.h - 6);
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(v.w / 6, -v.h / 2 + 2); ctx.lineTo(v.w / 6, v.h / 2 - 2); ctx.stroke();
-    ctx.fillStyle = '#111';
-    ctx.fillRect(-v.w / 2 + 2, -v.h / 2 - 2, 8, 4); ctx.fillRect(-v.w / 2 + 2, v.h / 2 - 2, 8, 4);
-    ctx.fillRect(v.w / 2 - 10, -v.h / 2 - 2, 8, 4); ctx.fillRect(v.w / 2 - 10, v.h / 2 - 2, 8, 4);
-  } else {
-    ctx.fillStyle = v.color;
-    ctx.beginPath();
-    ctx.roundRect(-v.w / 2, -v.h / 2, v.w, v.h, 7);
-    ctx.fill();
-    ctx.fillStyle = '#1c2733';
-    ctx.fillRect(-v.w / 6, -v.h / 2 + 3, v.w / 3, v.h - 6);
-    ctx.fillStyle = 'rgba(255,255,255,0.25)';
-    ctx.fillRect(v.w / 2 - 8, -v.h / 2 + 4, 4, v.h - 8);
-    ctx.fillStyle = '#111';
-    ctx.fillRect(-v.w / 2 + 2, -v.h / 2 - 2, 8, 4); ctx.fillRect(-v.w / 2 + 2, v.h / 2 - 2, 8, 4);
-    ctx.fillRect(v.w / 2 - 10, -v.h / 2 - 2, 8, 4); ctx.fillRect(v.w / 2 - 10, v.h / 2 - 2, 8, 4);
-    if (v.kind === 'taxi') {
-      ctx.fillStyle = '#111'; ctx.font = 'bold 8px system-ui, sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('TAXI', 0, 3);
-    }
-    if (v.kind === 'sport') {
-      // Rear spoiler.
-      ctx.fillStyle = '#111';
-      ctx.fillRect(-v.w / 2 - 3, -v.h / 2 - 1, 4, v.h + 2);
-    }
-  }
-  if (night) drawHeadlights(ctx, v);
-  ctx.restore();
-  void time;
-}
-
-export function drawVehicles(ctx, state) {
-  const night = state.night;
-  for (const s of state.skids) {
-    ctx.save(); ctx.globalAlpha = Math.max(0, s.life / 1.6) * 0.5;
-    ctx.translate(s.x, s.y); ctx.rotate(s.angle);
-    ctx.fillStyle = '#111'; ctx.fillRect(-16, -9, 32, 4); ctx.fillRect(-16, 5, 32, 4);
-    ctx.restore();
-  }
-  for (const v of state.vehicles) {
-    if (v.hp <= 0) continue;
-    drawOneVehicle(ctx, v, night, state.time);
-  }
+// Step out of the car, leaving it where it stands.
+export function exitCar(state) {
+  const car = state.player.car;
+  if (!car) return;
+  car.driver = 'traffic';
+  car.speed = 0;
+  const side = state.player.angle + Math.PI / 2;
+  state.player.x = car.x + Math.cos(side) * 34;
+  state.player.y = car.y + Math.sin(side) * 34;
+  const fixed = resolveCircle(state.city, state.player.x, state.player.y, CFG.playerRadius);
+  state.player.x = fixed.x;
+  state.player.y = fixed.y;
+  state.player.car = null;
 }

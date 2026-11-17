@@ -1,9 +1,8 @@
-// Neon Bay Nights v3 — entry program for the gta6-01 bounty (Node 22, stdlib only).
-// It hands the game in: copy this repository's game/ and screenshots/ into
-// /output (or MAKEFUN_OUTPUT_DIR outside the grader) and write the dossier
-// the judge reads, built by the vendored make.fun library. The program runs
-// twice and must write identical bytes both times, so it copies files and
-// lets buildDossier do the only writing.
+// Neon Bay Nights, handed in: a Node 22 program, standard library only. It
+// copies the game's static files and its screenshots beside this file into the
+// output directory and writes dossier.json there with the vendored make.fun
+// library, so the judge can read the game. Run it locally with:
+//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,30 +10,22 @@ import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
+const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-function outputDir() {
-  return process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-}
+mkdirSync(out, { recursive: true });
+cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
+mkdirSync(join(out, 'screenshots'), { recursive: true });
+if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 
-function copyGame(out) {
-  mkdirSync(out, { recursive: true });
-  cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-  mkdirSync(join(out, 'screenshots'), { recursive: true });
-  if (existsSync(join(here, 'screenshots'))) {
-    cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
-  }
-}
-
-// The scorer's caps, from the kit's reference: the dossier text cap shapes
-// the bytes; the rest refuse an entry the scorer would refuse anyway.
-const DOSSIER_OPTIONS = {
-  text_max_bytes: 163840,
-  screenshots: { max: 4, max_bytes: 262144 },
-  game_max_files: 993,
-  game_max_bytes: 50331648,
-  game_path_max_bytes: 1000,
-};
-
-const out = outputDir();
-copyGame(out);
-writeFileSync(join(out, 'dossier.json'), buildDossier(out, DOSSIER_OPTIONS));
+// The scorer's own caps (see the competition's RULES.txt): only text_max_bytes
+// shapes the bytes; the others refuse an entry the scorer would refuse.
+writeFileSync(
+  join(out, 'dossier.json'),
+  buildDossier(out, {
+    text_max_bytes: 163840,
+    screenshots: { max: 4, max_bytes: 262144 },
+    game_max_files: 993,
+    game_max_bytes: 50331648,
+    game_path_max_bytes: 1000,
+  }),
+);

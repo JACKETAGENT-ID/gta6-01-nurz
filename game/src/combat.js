@@ -1,207 +1,127 @@
-// Combat v3: fists, pistol, reload, bullets, particles and smoke.
-// Raka fights on foot. Punching and shooting are crimes: the wanted heat
-// notices, nearby pedestrians scatter, and the police answer. Handbrake
-// turns leave tyre smoke; wrecks and explosions leave a smoke column that
-// hangs in the air and slowly thins.
-
-import { clamp } from './rng.js';
-import { collideBuildings } from './citymap.js';
-import { addHeat } from './police.js';
+// Combat: fists and a pistol, with tracers, reloads and consequences. Every shot
+// is loud — pedestrians run, the wanted level climbs, and the police notice.
+import { CFG } from './config.js';
+import { hitsBuilding } from './citymap.js';
 import { scarePeds } from './walkers.js';
+import { addWanted } from './police.js';
+import { playShot, playPunch } from './audio.js';
 
-export function tryPunch(state) {
+export function createCombat() {
+  return {
+    bullets: [],
+    ammo: 12,
+    reloading: 0,
+    punchCooldown: 0,
+    muzzle: 0,
+  };
+}
+
+// Fire toward a world point (the mouse). Returns false while reloading or empty.
+export function shoot(state, tx, ty) {
+  const c = state.combat;
   const p = state.player;
-  if (p.vehicle || p.punchCd > 0 || state.mode !== 'playing') return;
-  p.punchCd = 0.45;
-  p.punchAnim = 0.22;
-  state.audio.sfx('punch');
-  const fx = p.x + Math.cos(p.angle) * 34, fy = p.y + Math.sin(p.angle) * 34;
+  if (c.reloading > 0 || c.ammo <= 0) return false;
+  const ox = p.car ? p.car.x : p.x;
+  const oy = p.car ? p.car.y : p.y;
+  const angle = Math.atan2(ty - oy, tx - ox);
+  c.bullets.push({
+    x: ox + Math.cos(angle) * 26,
+    y: oy + Math.sin(angle) * 26,
+    vx: Math.cos(angle) * CFG.bulletSpeed,
+    vy: Math.sin(angle) * CFG.bulletSpeed,
+    life: 1.2,
+  });
+  c.ammo -= 1;
+  c.muzzle = 0.08;
+  state.particles.push({ x: ox + Math.cos(angle) * 30, y: oy + Math.sin(angle) * 30, vx: 0, vy: 0, life: 0.12, max: 0.12, color: '#ffe14d', r: 8 });
+  playShot(state.audio);
+  scarePeds(state, ox, oy, 320);
+  if (c.ammo === 0) {
+    c.reloading = CFG.reloadSeconds;
+    state.toast = 'Reloading…';
+    state.toastTimer = 1.2;
+  }
+  return true;
+}
+
+// A swing at arm's length: hurts a pedestrian or a cop, and the law notices.
+export function punch(state) {
+  const c = state.combat;
+  const p = state.player;
+  if (c.punchCooldown > 0 || p.car) return false;
+  c.punchCooldown = 0.45;
+  playPunch(state.audio);
+  const fx = p.x + Math.cos(p.angle) * 34;
+  const fy = p.y + Math.sin(p.angle) * 34;
   let hit = false;
   for (const ped of state.peds) {
-    if (ped.mode === 'down') continue;
-    if (Math.hypot(ped.x - fx, ped.y - fy) < 30) {
-      ped.mode = 'down'; ped.down = 4;
+    if (!ped.alive) continue;
+    if (Math.hypot(ped.x - fx, ped.y - fy) < CFG.punchRange) {
+      ped.alive = false;
+      state.particles.push({ x: ped.x, y: ped.y, vx: 0, vy: -30, life: 0.6, max: 0.6, color: '#ff5a5a', r: 7 });
       hit = true;
     }
   }
-  if (hit) {
-    addHeat(state, 0.8);
-    scarePeds(state, p.x, p.y, 240);
-    state.particles.push({ x: fx, y: fy, kind: 'hit', life: 0.4, n: 8 });
+  if (hit) addWanted(state, 1, 'Assault');
+  return hit;
+}
+
+export function updateCombat(state, dt) {
+  const c = state.combat;
+  if (c.reloading > 0) {
+    c.reloading -= dt;
+    if (c.reloading <= 0) {
+      c.ammo = 12;
+      state.toast = 'Reloaded';
+      state.toastTimer = 1;
+    }
   }
-}
+  if (c.punchCooldown > 0) c.punchCooldown -= dt;
+  if (c.muzzle > 0) c.muzzle -= dt;
 
-export function tryShoot(state) {
-  const p = state.player;
-  if (p.vehicle || state.mode !== 'playing') return;
-  if (p.reloadT > 0 || p.shootCd > 0) return;
-  if (p.ammo <= 0) { startReload(state); return; }
-  p.ammo -= 1;
-  p.shootCd = 0.22;
-  p.muzzle = 0.07;
-  const a = Math.atan2(state.input.mouseWy - p.y, state.input.mouseWx - p.x);
-  p.angle = a;
-  state.bullets.push({
-    x: p.x + Math.cos(a) * 22, y: p.y + Math.sin(a) * 22,
-    vx: Math.cos(a) * 900, vy: Math.sin(a) * 900, life: 0.7,
-  });
-  state.audio.sfx('shot');
-  state.shake = Math.min(8, state.shake + 1.5);
-  scarePeds(state, p.x, p.y, 260);
-  addHeat(state, 0.25);
-}
-
-export function startReload(state) {
-  const p = state.player;
-  if (p.reloadT > 0 || p.ammo >= 12) return;
-  p.reloadT = 1.2;
-  state.audio.sfx('reload');
-}
-
-function bulletHitSpark(state, x, y, kind) {
-  state.particles.push({ x, y, kind, life: kind === 'boom' ? 1 : 0.3, n: kind === 'boom' ? 24 : 8 });
-}
-
-export function updateBullets(state, dt) {
-  const p = state.player;
-  p.shootCd = Math.max(0, (p.shootCd || 0) - dt);
-  p.punchCd = Math.max(0, (p.punchCd || 0) - dt);
-  p.punchAnim = Math.max(0, (p.punchAnim || 0) - dt);
-  p.muzzle = Math.max(0, (p.muzzle || 0) - dt);
-  if (p.reloadT > 0) {
-    p.reloadT -= dt;
-    if (p.reloadT <= 0) { p.ammo = 12; state.audio.sfx('click'); }
-  }
-  for (let i = state.bullets.length - 1; i >= 0; i--) {
-    const b = state.bullets[i];
-    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
-    let dead = b.life <= 0;
-    const probe = { x: b.x, y: b.y };
-    if (!dead && collideBuildings(state.city, probe, 3)) {
-      bulletHitSpark(state, b.x, b.y, 'spark');
+  for (let i = c.bullets.length - 1; i >= 0; i -= 1) {
+    const b = c.bullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.life -= dt;
+    let dead = b.life <= 0 || b.x < 0 || b.y < 0 || b.x > CFG.worldW || b.y > CFG.worldH;
+    if (!dead && hitsBuilding(state.city, b.x, b.y, 2)) {
+      state.particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 0.3, max: 0.3, color: '#ffd34d', r: 4 });
       dead = true;
     }
     if (!dead) {
       for (const ped of state.peds) {
-        if (ped.mode !== 'down' && Math.hypot(ped.x - b.x, ped.y - b.y) < 12) {
-          ped.mode = 'down'; ped.down = 6;
-          state.particles.push({ x: b.x, y: b.y, kind: 'hit', life: 0.4, n: 10 });
-          addHeat(state, 0.8);
-          scarePeds(state, b.x, b.y, 240);
-          dead = true; break;
+        if (!ped.alive) continue;
+        if (Math.hypot(ped.x - b.x, ped.y - b.y) < 14) {
+          ped.alive = false;
+          state.particles.push({ x: ped.x, y: ped.y, vx: 0, vy: -30, life: 0.6, max: 0.6, color: '#ff5a5a', r: 7 });
+          addWanted(state, 1, 'Shooting');
+          dead = true;
+          break;
         }
       }
     }
     if (!dead) {
-      for (const c of state.police) {
-        if (Math.hypot(c.x - b.x, c.y - b.y) < 26) {
-          c.hp -= 25;
-          bulletHitSpark(state, b.x, b.y, 'spark');
-          addHeat(state, 1);
-          if (c.hp <= 0) {
-            bulletHitSpark(state, c.x, c.y, 'boom');
-            state.smoke.push({ x: c.x, y: c.y, life: 1.4, r: 24 });
-            state.audio.sfx('boom');
-            state.police.splice(state.police.indexOf(c), 1);
+      for (const car of state.cars) {
+        if (car.driver === 'player') continue;
+        const dx = car.x - b.x;
+        const dy = car.y - b.y;
+        const along = dx * Math.cos(car.angle) + dy * Math.sin(car.angle);
+        const across = Math.abs(-dx * Math.sin(car.angle) + dy * Math.cos(car.angle));
+        if (Math.abs(along) < car.len / 2 && across < car.wid / 2 + 4) {
+          car.health -= CFG.bulletDamage;
+          state.particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 0.3, max: 0.3, color: '#ffd34d', r: 5 });
+          if (car.driver === 'police') addWanted(state, 1, 'Attacking police');
+          if (car.health <= 0) {
+            car.health = 100;
+            car.driver = 'traffic';
+            car.speed = 0;
           }
-          dead = true; break;
+          dead = true;
+          break;
         }
       }
     }
-    if (!dead) {
-      for (const r of state.roadblocks) {
-        if (Math.hypot(r.x - b.x, r.y - b.y) < 26) {
-          r.hp -= 25;
-          if (r.hp <= 0) state.roadblocks.splice(state.roadblocks.indexOf(r), 1);
-          dead = true; break;
-        }
-      }
-    }
-    if (dead) state.bullets.splice(i, 1);
-  }
-}
-
-export function damagePlayer(state, dmg) {
-  const p = state.player;
-  p.hp = clamp(p.hp - dmg, 0, 100);
-  state.shake = Math.min(12, state.shake + 6);
-  state.audio.sfx('hurt');
-  if (p.hp <= 0) {
-    state.mode = 'wasted';
-    state.audio.sfx('wasted');
-  }
-}
-
-export function spawnParticles(state, kind, x, y, n) {
-  state.particles.push({ x, y, kind, life: kind === 'boom' ? 1 : 0.5, n });
-}
-
-export function updateParticles(state, dt) {
-  for (let i = state.particles.length - 1; i >= 0; i--) {
-    const pt = state.particles[i];
-    pt.life -= dt;
-    if (pt.life <= 0) state.particles.splice(i, 1);
-  }
-  for (let i = state.skids.length - 1; i >= 0; i--) {
-    state.skids[i].life -= dt;
-    if (state.skids[i].life <= 0) state.skids.splice(i, 1);
-  }
-  for (let i = state.smoke.length - 1; i >= 0; i--) {
-    const s = state.smoke[i];
-    s.life -= dt;
-    s.r += dt * 14;
-    if (s.life <= 0) state.smoke.splice(i, 1);
-  }
-}
-
-export function drawBulletsAndParticles(ctx, state) {
-  // Bullet tracers: a bright line back along the flight path.
-  ctx.strokeStyle = '#ffe14d';
-  ctx.lineWidth = 2;
-  for (const b of state.bullets) {
-    const l = Math.hypot(b.vx, b.vy) || 1;
-    ctx.beginPath();
-    ctx.moveTo(b.x - (b.vx / l) * 16, b.y - (b.vy / l) * 16);
-    ctx.lineTo(b.x, b.y);
-    ctx.stroke();
-  }
-  // Tyre smoke and wreck smoke: grey puffs that grow and thin.
-  for (const s of state.smoke) {
-    const a = clamp(s.life / 1.4, 0, 1) * 0.45;
-    const g = ctx.createRadialGradient(s.x, s.y, 2, s.x, s.y, s.r);
-    g.addColorStop(0, `rgba(120,120,125,${a})`);
-    g.addColorStop(1, 'rgba(120,120,125,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
-  }
-  for (const pt of state.particles) {
-    const a = clamp(pt.life / 0.5, 0, 1);
-    if (pt.kind === 'boom') {
-      const r = (1 - pt.life) * 90 + 12;
-      const g = ctx.createRadialGradient(pt.x, pt.y, 4, pt.x, pt.y, r);
-      g.addColorStop(0, `rgba(255,220,80,${a})`);
-      g.addColorStop(0.5, `rgba(255,90,20,${a * 0.8})`);
-      g.addColorStop(1, 'rgba(120,20,0,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2); ctx.fill();
-    } else if (pt.kind === 'spark') {
-      ctx.fillStyle = `rgba(255,220,100,${a})`;
-      for (let i = 0; i < pt.n; i++) {
-        const ang = (i / pt.n) * Math.PI * 2 + pt.life * 9;
-        ctx.fillRect(pt.x + Math.cos(ang) * 12 * (1 - a), pt.y + Math.sin(ang) * 12 * (1 - a), 3, 3);
-      }
-    } else if (pt.kind === 'pickup') {
-      ctx.fillStyle = `rgba(57,213,255,${a})`;
-      for (let i = 0; i < pt.n; i++) {
-        const ang = (i / pt.n) * Math.PI * 2 + pt.life * 6;
-        ctx.fillRect(pt.x + Math.cos(ang) * 16 * (1 - a), pt.y + Math.sin(ang) * 16 * (1 - a), 3, 3);
-      }
-    } else {
-      ctx.fillStyle = `rgba(255,80,80,${a})`;
-      for (let i = 0; i < pt.n; i++) {
-        const ang = (i / pt.n) * Math.PI * 2;
-        ctx.fillRect(pt.x + Math.cos(ang) * 9, pt.y + Math.sin(ang) * 9, 3, 3);
-      }
-    }
+    if (dead) c.bullets.splice(i, 1);
   }
 }
