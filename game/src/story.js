@@ -1,10 +1,13 @@
-// Story: four missions for Raka, plus the taxi side-job.
-// Madame Lumen runs the Neon Bay night scene. Raka starts as her courier
-// and ends up running from the whole Neon Bay police force to a boat on
-// Coral Beach. Each mission is a chain of stages with a map target.
+// Story v3: six missions for Raka, plus the taxi side-job.
+// Madame Lumen runs the Neon Bay night scene. Raka starts as her courier,
+// survives a rainy getaway and a bank vault crack, and ends up running from
+// the whole Neon Bay police force to a boat on Coral Beach. Each mission is
+// a chain of stages with a map target; the vault stage is a timed hold —
+// stay inside the ring while the drill works and the cops close in.
 
 import { addHeat } from './police.js';
 import { randomRoadPoint } from './citymap.js';
+import { setRain, unlockRain } from './weather.js';
 
 export const MISSIONS = [
   {
@@ -46,6 +49,27 @@ export const MISSIONS = [
       { text: 'Escape to the boat on Coral Beach — wanted level 4!', spot: 'escapeBoat', radius: 110 },
     ],
   },
+  {
+    name: 'Rainy Getaway',
+    giver: 'Madame Lumen',
+    pay: 1200,
+    briefing: 'A fixer waits in the rainy alley with Lumen\'s cut. The streets are slick and the tail is back — meet him, then shake them at the market.',
+    stages: [
+      { text: 'Meet the fixer in the rainy alley', spot: 'alleyMeet', radius: 90 },
+      { text: 'Shake the tail — reach Crescent Market', spot: 'marketPlaza', radius: 110 },
+    ],
+  },
+  {
+    name: 'The Vault',
+    giver: 'Madame Lumen',
+    pay: 2500,
+    briefing: 'One last job: the Neon Bay Bank vault. Hold the ring while the drill works — four stars of police will try to stop you — then run for the hideout.',
+    stages: [
+      { text: 'Reach the Neon Bay Bank', spot: 'bank', radius: 110 },
+      { text: 'Hold the vault ring — keep the drill running!', spot: 'bank', radius: 130, hold: 8 },
+      { text: 'Escape with the cash to the hideout', spot: 'hideout', radius: 90 },
+    ],
+  },
 ];
 
 export function currentMission(state) {
@@ -66,11 +90,24 @@ export function startMission(state, idx) {
   state.missionIdx = idx;
   state.missionStage = 0;
   state.missionDone = false;
+  state.vaultT = 0;
   const m = MISSIONS[idx];
   state.missionMessage = `${m.giver}: ${m.briefing}`;
   state.hudFlash = `Mission: ${m.name}`;
   if (idx === 2) spawnShadowCar(state);
   if (idx === 3) {
+    state.heat = 5.5;
+    state.wanted = 4;
+    state.lastCrime = state.time;
+  }
+  if (idx === 4) {
+    // Rainy Getaway: the rain locks on for the whole mission.
+    setRain(state, 1, true);
+    state.heat = 2;
+    state.wanted = 2;
+    state.lastCrime = state.time;
+  }
+  if (idx === 5) {
     state.heat = 5.5;
     state.wanted = 4;
     state.lastCrime = state.time;
@@ -89,6 +126,21 @@ export function spawnShadowCar(state) {
     ],
     wp: 0, tailTime: 0,
   };
+}
+
+function advanceStage(state, m) {
+  state.missionStage += 1;
+  state.audio.sfx('pickup');
+  if (state.missionStage >= m.stages.length) {
+    completeMission(state, m);
+  } else {
+    state.missionMessage = m.stages[state.missionStage].text;
+    const next = m.stages[state.missionStage];
+    if (next.hold) {
+      state.vaultT = next.hold;
+      state.audio.sfx('vault');
+    }
+  }
 }
 
 export function updateMissions(state, dt) {
@@ -132,18 +184,34 @@ export function updateMissions(state, dt) {
   const spot = state.city.spots[st.spot];
   if (!spot) return;
   const d = Math.hypot(pl.x - spot.x, pl.y - spot.y);
+
+  // Vault hold: stay inside the ring while the drill works.
+  if (st.hold) {
+    if (d < st.radius) {
+      state.vaultT = Math.max(0, (state.vaultT || st.hold) - dt);
+      state.holdProgress = 1 - state.vaultT / st.hold;
+      if (state.vaultT <= 0) {
+        state.holdProgress = 0;
+        state.missionMessage = 'Vault cracked! The cash is yours — run!';
+        state.audio.sfx('cash');
+        advanceStage(state, m);
+      }
+    } else {
+      state.missionMessage = 'Get back inside the vault ring — the drill is stalling!';
+    }
+    return;
+  }
+
   if (d < st.radius) {
     if (state.missionIdx === 1 && state.missionStage === 0) {
       addHeat(state, 2);
       state.missionMessage = 'Crate grabbed! The harbour patrol is on you — run!';
     }
-    state.missionStage += 1;
-    state.audio.sfx('pickup');
-    if (state.missionStage >= m.stages.length) {
-      completeMission(state, m);
-    } else {
-      state.missionMessage = m.stages[state.missionStage].text;
+    if (state.missionIdx === 4 && state.missionStage === 0) {
+      addHeat(state, 1);
+      state.missionMessage = 'The cut is yours — now lose the tail at the market!';
     }
+    advanceStage(state, m);
   }
 }
 
@@ -153,6 +221,7 @@ function completeMission(state, m) {
   state.missionMessage = `Mission complete: ${m.name} — $${m.pay} earned.`;
   state.hudFlash = `+$${m.pay} — ${m.name} complete!`;
   state.audio.sfx('mission');
+  if (state.missionIdx === 4) unlockRain(state);
   state.missionIdx += 1;
   state.missionStage = 0;
   if (state.missionIdx >= MISSIONS.length) {
@@ -175,7 +244,7 @@ export function startTaxiJob(state) {
     px: stand.x, py: stand.y, dx: dest.x, dy: dest.y,
     timer: 150,
   };
-  state.missionMessage = `Taxi job: pick up the passenger at the stand ($${fare} fare).`;
+  state.missionMessage = `Taxi job: pick up the passenger at the stand ($${fare} fare, +$15 tip if you hurry).`;
   state.audio.sfx('taxi');
 }
 
@@ -197,9 +266,11 @@ export function updateTaxi(state, dt) {
       state.audio.sfx('pickup');
     }
   } else if (Math.hypot(pl.x - t.dx, pl.y - t.dy) < 100) {
-    state.money += t.fare;
-    state.earned += t.fare;
-    state.hudFlash = `Taxi fare +$${t.fare}!`;
+    const tip = t.timer > 90 ? 15 : 0;
+    const total = t.fare + tip;
+    state.money += total;
+    state.earned += total;
+    state.hudFlash = tip > 0 ? `Taxi fare +$${t.fare} + $${tip} tip!` : `Taxi fare +$${t.fare}!`;
     state.missionMessage = 'Fare paid. Press T for another passenger.';
     state.audio.sfx('mission');
     state.taxi = { active: false };

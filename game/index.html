@@ -4,16 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Neon Bay Nights — an original open-world crime game</title>
+<meta name="description" content="Neon Bay Nights: a 100% original open-world crime game — six story missions, rain, radio, taxis and twenty neon packages to hunt.">
 <style>
   html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0b0e1a; }
   #game { display: block; width: 100vw; height: 100vh; image-rendering: auto; cursor: crosshair; }
   #fallback { position: fixed; inset: 0; display: none; place-items: center; color: #e8ecff;
     font: 16px/1.5 system-ui, sans-serif; text-align: center; padding: 24px; }
+  #fallback strong { color: #ff4fd8; }
 </style>
 </head>
 <body>
 <canvas id="game" width="1280" height="800"></canvas>
-<div id="fallback">Neon Bay Nights needs JavaScript and a canvas-capable browser.</div>
+<div id="fallback"><p><strong>Neon Bay Nights</strong> needs JavaScript and a canvas-capable browser.</p></div>
 <script type="module" src="./src/boot.js"></script>
 </body>
 </html>

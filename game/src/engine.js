@@ -1,6 +1,8 @@
-// Engine: game state, main loop, camera, player movement and rendering.
-// This is the glue: the city, vehicles, pedestrians, police, combat, story,
-// day/night, audio, HUD and save systems all meet here.
+// Engine v3: game state, main loop, camera, player movement and rendering.
+// The glue: the city, vehicles, pedestrians, police, combat, story, weather,
+// radio, collectibles, day/night, audio, HUD and save systems all meet here.
+// Six missions now, rain fronts, three radio stations and twenty neon
+// packages hidden around Neon Bay.
 
 import { makeRng, clamp, hashSeed } from './rng.js';
 import { buildCity, drawCity, collideBuildings, inWater, WORLD } from './citymap.js';
@@ -12,6 +14,9 @@ import { updatePolice, drawPolice } from './police.js';
 import { tryPunch, tryShoot, startReload, updateBullets, updateParticles, drawBulletsAndParticles } from './combat.js';
 import { startMission, updateMissions, missionTarget, currentMission, startTaxiJob, updateTaxi } from './story.js';
 import { updateDayNight, drawNightOverlay } from './daynight.js';
+import { createWeather, updateWeather, drawRain, isWet } from './weather.js';
+import { nextStation } from './radio.js';
+import { spawnPackages, updatePackages, drawPackages } from './collectibles.js';
 import { drawHUD, drawMinimap, drawMenus } from './hud.js';
 import { saveGame, loadGame } from './savegame.js';
 import { applyShot } from './shots.js';
@@ -32,7 +37,10 @@ export function createGame(canvas, opts) {
       shootCd: 0, punchCd: 0, punchAnim: 0, muzzle: 0, reloadT: 0,
     },
     vehicles: [], peds: [], police: [], roadblocks: [],
-    bullets: [], particles: [], skids: [],
+    bullets: [], particles: [], skids: [], smoke: [],
+    packages: [], packagesTaken: 0,
+    weather: createWeather(),
+    radioStation: save ? save.radioStation || 0 : 0,
     heat: 0, wanted: 0, lastCrime: -99,
     money: save ? save.money : 50,
     earned: 0,
@@ -42,6 +50,7 @@ export function createGame(canvas, opts) {
     hudFlash: '', flashT: 0,
     taxi: { active: false },
     shadowCar: null,
+    vaultT: 0, holdProgress: 0,
     dayT: 0.3, night: false, dusk: false, darkness: 0,
     cam: { x: 0, y: 0, w: 1280, h: 800 },
     input: { keys: new Set(), pressed: new Set(), mouse: { x: 640, y: 400, down: false }, mouseWx: 0, mouseWy: 0 },
@@ -50,7 +59,8 @@ export function createGame(canvas, opts) {
   };
 
   spawnTraffic(state);
-  spawnWalkers(state, 34);
+  spawnWalkers(state, 40);
+  spawnPackages(state);
   bindControls(state, canvas);
   startMission(state, state.missionIdx);
 
@@ -115,7 +125,12 @@ export function createGame(canvas, opts) {
         else tryEnterVehicle(state);
       }
       else if (pr.has('KeyF')) tryPunch(state);
-      else if (pr.has('KeyR')) startReload(state);
+      // R reloads on foot and changes the radio while driving.
+      else if (pr.has('KeyR')) {
+        if (state.player.vehicle) nextStation(state);
+        else startReload(state);
+      }
+      else if (pr.has('KeyV')) nextStation(state);
       else if (pr.has('KeyT')) startTaxiJob(state);
     }
     pr.clear();
@@ -152,7 +167,8 @@ export function createGame(canvas, opts) {
     state.flashT = Math.max(0, state.flashT - dt);
     state.shake = Math.max(0, state.shake - dt * 22);
     updateDayNight(state, dt);
-    audio.update(dt, state.mode === 'playing');
+    updateWeather(state, dt);
+    audio.update(dt, state.mode === 'playing', state.weather.intensity);
     handlePressed();
 
     if (state.mode === 'menu') {
@@ -181,6 +197,7 @@ export function createGame(canvas, opts) {
     updateParticles(state, dt);
     updateMissions(state, dt);
     updateTaxi(state, dt);
+    updatePackages(state, dt);
 
     // Camera follows the player.
     const tx = clamp(pl.x - state.cam.w / 2, 0, Math.max(0, WORLD - state.cam.w));
@@ -199,10 +216,12 @@ export function createGame(canvas, opts) {
     ctx.translate(p.x, p.y);
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath(); ctx.ellipse(1, 4, 10, 7, 0, 0, Math.PI * 2); ctx.fill();
-    // Raka: teal jacket, dark jeans.
+    // Raka: teal jacket with a neon stripe, dark jeans, cap.
     ctx.rotate(p.angle);
     ctx.fillStyle = '#2ec4b6';
     ctx.beginPath(); ctx.arc(0, 0, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ff4fd8';
+    ctx.fillRect(-2, -11, 4, 22);
     ctx.fillStyle = '#22283a';
     ctx.fillRect(-4, -9, 8, 4);
     ctx.fillRect(-4, 5, 8, 4);
@@ -216,11 +235,17 @@ export function createGame(canvas, opts) {
     if (p.muzzle > 0) {
       ctx.fillStyle = 'rgba(255,220,100,0.9)';
       ctx.beginPath(); ctx.arc(24, 0, 7, 0, Math.PI * 2); ctx.fill();
+      const g = ctx.createRadialGradient(24, 0, 2, 24, 0, 26);
+      g.addColorStop(0, 'rgba(255,220,100,0.5)'); g.addColorStop(1, 'rgba(255,220,100,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(24, 0, 26, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
-    // Head.
+    // Head with cap.
     ctx.fillStyle = '#e8b98a';
     ctx.beginPath(); ctx.arc(p.x + Math.cos(p.angle) * 2, p.y + Math.sin(p.angle) * 2, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#2ec4b6';
+    ctx.beginPath(); ctx.arc(p.x + Math.cos(p.angle) * 2, p.y + Math.sin(p.angle) * 2 - 1, 5, Math.PI, 0); ctx.fill();
   }
 
   function drawShadowCar(ctx, state) {
@@ -243,18 +268,26 @@ export function createGame(canvas, opts) {
 
   function drawMissionBeacon(ctx, state) {
     const t = missionTarget(state);
-    if (!t) return;
-    const pulse = 1 + Math.sin(state.time * 4) * 0.2;
-    ctx.save();
-    ctx.globalAlpha = 0.35;
-    ctx.fillStyle = '#ffd23e';
-    ctx.fillRect(t.x - 4, t.y - 160, 8, 160);
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = '#ffd23e';
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(t.x, t.y, 30 * pulse, 0, Math.PI * 2); ctx.stroke();
-    ctx.beginPath(); ctx.arc(t.x, t.y, 8, 0, Math.PI * 2); ctx.fillStyle = '#ffd23e'; ctx.fill();
-    ctx.restore();
+    if (t) {
+      const pulse = 1 + Math.sin(state.time * 4) * 0.2;
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = '#ffd23e';
+      ctx.fillRect(t.x - 4, t.y - 160, 8, 160);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#ffd23e';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(t.x, t.y, 30 * pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(t.x, t.y, 8, 0, Math.PI * 2); ctx.fillStyle = '#ffd23e'; ctx.fill();
+      // Vault hold ring: a second, wider ring while the drill works.
+      const m = currentMission(state);
+      if (m && m.stages[state.missionStage] && m.stages[state.missionStage].hold) {
+        ctx.strokeStyle = '#c9a24f';
+        ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(t.x, t.y, 130, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.restore();
+    }
     const taxi = state.taxi;
     if (taxi.active && !taxi.boarded) {
       ctx.fillStyle = '#39d5ff';
@@ -279,8 +312,9 @@ export function createGame(canvas, opts) {
     ctx.clearRect(0, 0, w, h);
     ctx.save();
     ctx.translate(-Math.round(state.cam.x + shx), -Math.round(state.cam.y + shy));
-    drawCity(ctx, state.city, state.cam, state.time, state.night);
+    drawCity(ctx, state.city, state.cam, state.time, state.night, isWet(state));
     drawMissionBeacon(ctx, state);
+    drawPackages(ctx, state);
     drawVehicles(ctx, state);
     drawWalkers(ctx, state);
     drawPolice(ctx, state);
@@ -289,6 +323,7 @@ export function createGame(canvas, opts) {
     drawBulletsAndParticles(ctx, state);
     ctx.restore();
     drawNightOverlay(ctx, state, w, h);
+    drawRain(ctx, state, w, h);
     if (state.mode !== 'menu') {
       drawHUD(ctx, state, w, h);
       drawMinimap(ctx, state, w, h);

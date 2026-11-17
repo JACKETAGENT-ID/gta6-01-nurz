@@ -1,7 +1,9 @@
-// Neon Bay city map: districts, roads, buildings, docks and beach.
-// The city is one fixed 4800x4800 world built from a seed: Downtown in the
-// middle, the Old Docks harbour on the west edge, and Coral Beach along the
-// south edge. Roads form a grid; everything else is placed inside the blocks.
+// Neon Bay city map v3: districts, roads, buildings, docks and beach.
+// One fixed 4800x4800 world from a seed. Downtown sits in the middle, the
+// Old Docks harbour hugs the west edge, Coral Beach runs along the south,
+// and the Crescent Market fills the north-east. Roads form a grid; blocks
+// hold one to three buildings, and the Neon Bay Bank anchors its own block.
+// At night the windows light up; in the rain the asphalt goes dark and wet.
 
 import { makeRng, clamp } from './rng.js';
 
@@ -11,18 +13,30 @@ export const ROAD_HALF = 58;
 
 const PALETTE = ['#2e3d5c', '#4a2e55', '#274b3a', '#5c3a2e', '#3a2e5c', '#553a4a', '#2e4a55', '#4a4a2e'];
 const ROOFS = ['#1d2740', '#33203a', '#1c3529', '#40261d', '#282040', '#3a2830', '#20323a', '#33301c'];
-const NEON_SIGNS = [
+const SIGN_TEXTS = [
   { text: 'LUMEN', color: '#ff4fd8' }, { text: 'NEON BAY', color: '#39d5ff' },
   { text: 'PIER 9', color: '#ffb347' }, { text: 'TAXI', color: '#ffe14d' },
   { text: 'HOTEL', color: '#7dff5e' }, { text: '24H', color: '#ff6b6b' },
   { text: 'DOCK 7', color: '#39d5ff' }, { text: 'CLUB NOVA', color: '#ff4fd8' },
   { text: 'RAMEN', color: '#ffe14d' }, { text: 'ARCADE', color: '#7dff5e' },
+  { text: 'BANK', color: '#ffe14d' }, { text: 'MARKET', color: '#7dff5e' },
+  { text: 'NOODLE', color: '#ff9d5c' }, { text: 'CASINO', color: '#ff4fd8' },
+  { text: 'MOTEL', color: '#39d5ff' }, { text: 'PIER 12', color: '#ffb347' },
+  { text: 'RADIO 101', color: '#7dff5e' }, { text: 'VAULT', color: '#ff6b6b' },
 ];
 const CONTAINER_COLORS = ['#c0392b', '#2980b9', '#27ae60', '#f39c12', '#8e44ad', '#16a085'];
+const STALL_COLORS = ['#e84a5f', '#39d5ff', '#ffe14d', '#7dff5e', '#ff4fd8', '#ff9d5c'];
+
+// Bank block (bx 6, by 1) and market plaza are placed by hand, so the
+// random building pass skips their blocks.
+const BANK_BLOCK = { bx: 6, by: 1 };
+const BANK_RECT = { x: 2920, y: 940, w: 150, h: 150 };
+const MARKET_SPOT = { x: 3600, y: 2800 };
 
 export function districtAt(x, y) {
   if (x < 1000) return 'docks';
   if (y > 3900) return 'beach';
+  if (x >= 3200 && y >= 2400) return 'market';
   if (x < 2400 && y < 2400) return 'downtown';
   return 'uptown';
 }
@@ -45,16 +59,18 @@ export function buildCity(seed) {
   const rng = makeRng(seed);
   const city = {
     seed, buildings: [], containers: [], cranes: [], palms: [],
-    lamps: [], signs: [], piers: [], boats: [],
+    lamps: [], signs: [], piers: [], boats: [], stalls: [],
     taxiStands: [], spots: {},
   };
   const roadLines = [];
   for (let v = ROAD_STEP; v < WORLD; v += ROAD_STEP) roadLines.push(v);
   city.roadLines = roadLines;
 
-  // Buildings: one to three per block, skipped in the docks and on the beach.
+  // Buildings: one to three per block, skipped in the docks, on the beach,
+  // and in the hand-placed bank block.
   for (let bx = 0; bx < 11; bx++) {
     for (let by = 0; by < 11; by++) {
+      if (bx === BANK_BLOCK.bx && by === BANK_BLOCK.by) continue;
       const x0 = bx * ROAD_STEP + ROAD_STEP, y0 = by * ROAD_STEP + ROAD_STEP;
       const cx = x0 + ROAD_STEP / 2, cy = y0 + ROAD_STEP / 2;
       const d = districtAt(cx, cy);
@@ -74,12 +90,30 @@ export function buildCity(seed) {
         };
         city.buildings.push(b);
         if (b.downtown && rng.chance(0.45)) {
-          const s = rng.pick(NEON_SIGNS);
+          const s = rng.pick(SIGN_TEXTS);
           city.signs.push({ x: b.x + b.w / 2, y: b.y - 6, text: s.text, color: s.color });
         }
       }
     }
   }
+
+  // The Neon Bay Bank: one big marble block with columns, on its own block.
+  city.buildings.push({
+    ...BANK_RECT, color: '#8a7a5c', roof: '#5c4f38', downtown: false, bank: true,
+  });
+  city.signs.push({ x: BANK_RECT.x + BANK_RECT.w / 2, y: BANK_RECT.y - 8, text: 'NEON BAY BANK', color: '#ffe14d' });
+
+  // Crescent Market: striped stalls around the plaza.
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2;
+    city.stalls.push({
+      x: MARKET_SPOT.x + Math.cos(a) * 150,
+      y: MARKET_SPOT.y + Math.sin(a) * 120,
+      angle: a + Math.PI / 2,
+      color: STALL_COLORS[i % STALL_COLORS.length],
+    });
+  }
+  city.signs.push({ x: MARKET_SPOT.x, y: MARKET_SPOT.y - 170, text: 'CRESCENT MARKET', color: '#7dff5e' });
 
   // Old Docks: container stacks, gantry cranes, piers, moored boats.
   for (let i = 0; i < 46; i++) {
@@ -122,6 +156,9 @@ export function buildCity(seed) {
     shadowEnd: { x: 1200, y: 1200 },
     escapeBoat: { x: 2400, y: 4450 },
     pierGate: { x: 900, y: 2400 },
+    bank: { x: BANK_RECT.x + BANK_RECT.w / 2, y: BANK_RECT.y + BANK_RECT.h / 2 },
+    marketPlaza: { x: MARKET_SPOT.x, y: MARKET_SPOT.y },
+    alleyMeet: { x: 1300, y: 3200 },
   };
 
   // Street lamps at every intersection.
@@ -131,29 +168,24 @@ export function buildCity(seed) {
   return city;
 }
 
-// Push a circle out of every building it overlaps. Returns true on contact.
+// Push a circle out of every building and container it overlaps. Returns true on contact.
 export function collideBuildings(city, p, r) {
   let hit = false;
-  for (const b of city.buildings) {
-    const nx = clamp(p.x, b.x, b.x + b.w), ny = clamp(p.y, b.y, b.y + b.h);
+  const pushOut = (x0, y0, x1, y1) => {
+    const nx = clamp(p.x, x0, x1), ny = clamp(p.y, y0, y1);
     const dx = p.x - nx, dy = p.y - ny, d2 = dx * dx + dy * dy;
     if (d2 < r * r) {
       hit = true;
       if (d2 > 0.001) {
         const d = Math.sqrt(d2);
         p.x = nx + (dx / d) * r; p.y = ny + (dy / d) * r;
-      } else { p.x = b.x - r; }
+      } else { p.x = x0 - r; }
     }
-  }
+  };
+  for (const b of city.buildings) pushOut(b.x, b.y, b.x + b.w, b.y + b.h);
   for (const c of city.containers) {
     const hw = c.angle === 0 ? c.w / 2 : c.h / 2, hh = c.angle === 0 ? c.h / 2 : c.w / 2;
-    const nx = clamp(p.x, c.x - hw, c.x + hw), ny = clamp(p.y, c.y - hh, c.y + hh);
-    const dx = p.x - nx, dy = p.y - ny, d2 = dx * dx + dy * dy;
-    if (d2 < r * r) {
-      hit = true;
-      if (d2 > 0.001) { const d = Math.sqrt(d2); p.x = nx + (dx / d) * r; p.y = ny + (dy / d) * r; }
-      else { p.x = c.x - hw - r; }
-    }
+    pushOut(c.x - hw, c.y - hh, c.x + hw, c.y + hh);
   }
   return hit;
 }
@@ -171,13 +203,13 @@ export function randomRoadPoint(city, rng, district) {
   return { x: 2000, y: 2000 };
 }
 
-export function drawCity(ctx, city, cam, time, night) {
+export function drawCity(ctx, city, cam, time, night, wet) {
   const { x: cx, y: cy, w: vw, h: vh } = cam;
   const x0 = Math.max(0, cx - 80), y0 = Math.max(0, cy - 80);
   const x1 = Math.min(WORLD, cx + vw + 80), y1 = Math.min(WORLD, cy + vh + 80);
 
-  // Ground base.
-  ctx.fillStyle = '#3d7a44';
+  // Ground base: grass, darker when the rain has soaked it.
+  ctx.fillStyle = wet ? '#2f5e36' : '#3d7a44';
   ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
 
   // Beach sand and sea.
@@ -207,11 +239,11 @@ export function drawCity(ctx, city, cam, time, night) {
   }
 
   // Docks concrete apron.
-  ctx.fillStyle = '#8a8f98';
+  ctx.fillStyle = wet ? '#6e7278' : '#8a8f98';
   ctx.fillRect(Math.max(x0, 300), y0, Math.min(1000, x1) - Math.max(x0, 300), Math.min(y1, 3900) - y0);
 
-  // Roads: asphalt strips with sidewalks.
-  ctx.fillStyle = '#2b2f38';
+  // Roads: asphalt strips with sidewalks. Wet asphalt is darker and glossier.
+  ctx.fillStyle = wet ? '#1f222a' : '#2b2f38';
   for (const gx of city.roadLines) {
     if (gx > x0 - 80 && gx < x1 + 80) ctx.fillRect(gx - ROAD_HALF, y0, ROAD_HALF * 2, y1 - y0);
     if (gx > y0 - 80 && gx < y1 + 80) ctx.fillRect(x0, gx - ROAD_HALF, x1 - x0, ROAD_HALF * 2);
@@ -235,6 +267,14 @@ export function drawCity(ctx, city, cam, time, night) {
     }
     if (gx > y0 - 80 && gx < y1 + 80) {
       for (let x = Math.floor(x0 / 44) * 44; x < x1; x += 44) ctx.fillRect(x, gx - 2, 22, 4);
+    }
+  }
+  // Wet-road sheen: pale streaks catching the neon.
+  if (wet) {
+    ctx.fillStyle = 'rgba(160,190,255,0.08)';
+    for (const gx of city.roadLines) {
+      if (gx > x0 - 80 && gx < x1 + 80) ctx.fillRect(gx - ROAD_HALF + 14, y0, 10, y1 - y0);
+      if (gx > y0 - 80 && gx < y1 + 80) ctx.fillRect(x0, gx + ROAD_HALF - 24, x1 - x0, 10);
     }
   }
 
@@ -274,17 +314,45 @@ export function drawCity(ctx, city, cam, time, night) {
     ctx.fillStyle = '#8a6d1f'; ctx.fillRect(cr.x + cr.arm - 8, cr.y - 38, 16, 16);
   }
 
-  // Buildings with roof detail and fake shadow.
+  // Market stalls: striped awnings around the plaza.
+  for (const s of city.stalls) {
+    if (s.x < x0 - 60 || s.x > x1 + 60 || s.y < y0 - 60 || s.y > y1 + 60) continue;
+    ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.angle);
+    ctx.fillStyle = s.color;
+    ctx.beginPath(); ctx.moveTo(-26, -14); ctx.lineTo(26, -14); ctx.lineTo(18, 10); ctx.lineTo(-18, 10); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    for (let k = -2; k <= 2; k += 2) ctx.fillRect(k * 10 - 4, -14, 8, 24);
+    ctx.fillStyle = '#5c3a1e'; ctx.fillRect(-20, 10, 40, 6);
+    ctx.restore();
+  }
+
+  // Buildings: fake shadow, walls, roof, and windows that light up at night.
   for (const b of city.buildings) {
     if (b.x > x1 || b.x + b.w < x0 || b.y > y1 || b.y + b.h < y0) continue;
     ctx.fillStyle = 'rgba(0,0,0,0.28)';
     ctx.fillRect(b.x + 7, b.y + 9, b.w, b.h);
     ctx.fillStyle = b.color; ctx.fillRect(b.x, b.y, b.w, b.h);
     ctx.fillStyle = b.roof; ctx.fillRect(b.x + 6, b.y + 6, b.w - 12, b.h - 12);
-    ctx.fillStyle = 'rgba(255,255,255,0.16)';
+    // Windows: a fixed lit/unlit pattern per building, warm at night.
     const cols = Math.max(2, Math.floor(b.w / 26)), rows = Math.max(2, Math.floor(b.h / 26));
     for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
-      if ((i * 7 + j * 13 + b.x) % 3 === 0) ctx.fillRect(b.x + 10 + i * 22, b.y + 10 + j * 22, 9, 9);
+      const lit = (i * 7 + j * 13 + Math.floor(b.x)) % 4 === 0;
+      if (night && lit) {
+        ctx.fillStyle = 'rgba(255,205,110,0.95)';
+        ctx.fillRect(b.x + 10 + i * 22, b.y + 10 + j * 22, 9, 9);
+      } else if (!night) {
+        ctx.fillStyle = 'rgba(255,255,255,0.16)';
+        if ((i * 7 + j * 13 + Math.floor(b.x)) % 3 === 0) ctx.fillRect(b.x + 10 + i * 22, b.y + 10 + j * 22, 9, 9);
+      }
+    }
+    if (b.bank) {
+      // Marble columns and a vault door on the front face.
+      ctx.fillStyle = '#f2ead8';
+      for (let k = 0; k < 4; k++) ctx.fillRect(b.x + 18 + k * 36, b.y + b.h - 42, 12, 42);
+      ctx.fillStyle = '#3a3f4a';
+      ctx.beginPath(); ctx.arc(b.x + b.w / 2, b.y + b.h - 18, 14, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#c9a24f';
+      ctx.beginPath(); ctx.arc(b.x + b.w / 2, b.y + b.h - 18, 6, 0, Math.PI * 2); ctx.fill();
     }
   }
 
@@ -294,7 +362,7 @@ export function drawCity(ctx, city, cam, time, night) {
     ctx.save();
     ctx.font = 'bold 15px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.shadowColor = s.color; ctx.shadowBlur = night ? 16 : 6;
+    ctx.shadowColor = s.color; ctx.shadowBlur = night ? 18 : 6;
     ctx.fillStyle = s.color;
     ctx.fillText(s.text, s.x, s.y);
     ctx.restore();

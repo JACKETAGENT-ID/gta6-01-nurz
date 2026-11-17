@@ -1,14 +1,29 @@
-// HUD, minimap, objective arrow and menus for Neon Bay Nights.
+// HUD, minimap, objective arrow and menus for Neon Bay Nights v3.
+// Wanted stars pulse when the heat is on, the radio shows what is playing,
+// the package counter tracks the hunt, and the vault hold gets its own
+// progress bar. The minimap marks the mission target, taxi fares, cops,
+// the shadow car and every uncollected neon package.
 
 import { currentMission, missionTarget } from './story.js';
 import { clamp } from './rng.js';
+import { currentStation } from './radio.js';
+import { PACKAGE_COUNT } from './collectibles.js';
 
-function starRow(ctx, x, y, wanted) {
+function starRow(ctx, x, y, wanted, time) {
   ctx.font = 'bold 22px system-ui, sans-serif';
   ctx.textAlign = 'left';
   for (let i = 0; i < 5; i++) {
-    ctx.fillStyle = i < wanted ? '#ffd23e' : 'rgba(255,255,255,0.28)';
-    ctx.fillText('★', x + i * 26, y);
+    const lit = i < wanted;
+    // Lit stars throb with the heat; empty ones stay dim.
+    const pulse = lit ? 1 + Math.sin(time * 5 + i * 0.7) * 0.18 : 1;
+    ctx.save();
+    ctx.translate(x + i * 26 + 9, y - 8);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = lit ? '#ffd23e' : 'rgba(255,255,255,0.28)';
+    ctx.shadowColor = lit ? '#ffd23e' : 'transparent';
+    ctx.shadowBlur = lit ? 10 : 0;
+    ctx.fillText('★', -9, 8);
+    ctx.restore();
   }
 }
 
@@ -17,33 +32,57 @@ export function drawHUD(ctx, state, w, h) {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
 
-  // Top-left: cash and mission.
+  // Top-left: cash, packages, and mission.
   ctx.fillStyle = 'rgba(8,10,24,0.62)';
-  ctx.fillRect(14, 12, 470, 64);
+  ctx.fillRect(14, 12, 470, 84);
   ctx.fillStyle = '#7dff5e';
   ctx.font = 'bold 24px system-ui, sans-serif';
   ctx.fillText('$' + state.money.toLocaleString('en-US'), 26, 40);
+  ctx.fillStyle = '#39d5ff';
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.fillText('◆ ' + (state.packagesTaken || 0) + '/' + PACKAGE_COUNT + ' packages', 300, 40);
   const m = currentMission(state);
   ctx.fillStyle = '#e8ecff';
   ctx.font = 'bold 14px system-ui, sans-serif';
   if (m) {
     const st = m.stages[state.missionStage];
-    ctx.fillText(m.name, 26, 60);
+    ctx.fillText(m.name + '  ·  Mission ' + (state.missionIdx + 1) + ' of 6', 26, 60);
     ctx.fillStyle = '#ffd23e';
     ctx.font = '13px system-ui, sans-serif';
-    ctx.fillText(st ? st.text : '', 26, 72);
+    ctx.fillText(st ? st.text : '', 26, 78);
+    if (st && st.hold) {
+      ctx.fillText('Hold the ring: ' + Math.ceil(state.vaultT || 0) + 's left', 26, 92 - 0);
+    }
   } else {
     ctx.fillText('Free roam — Neon Bay is yours', 26, 60);
   }
 
-  // Top-right: wanted stars.
+  // Top-right: wanted stars + weather.
   ctx.fillStyle = 'rgba(8,10,24,0.62)';
-  ctx.fillRect(w - 168, 12, 154, 40);
-  starRow(ctx, w - 156, 40, state.wanted || 0);
+  ctx.fillRect(w - 168, 12, 154, 62);
+  starRow(ctx, w - 156, 40, state.wanted || 0, state.time);
   if (state.wanted > 0) {
     ctx.fillStyle = '#ff5e5e';
     ctx.font = 'bold 12px system-ui, sans-serif';
-    ctx.fillText('WANTED', w - 156, 66);
+    ctx.fillText('WANTED', w - 156, 62);
+  }
+  if (state.weather && state.weather.intensity > 0.3) {
+    ctx.fillStyle = '#9db8ff';
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.fillText('☂ RAIN — slick roads', w - 156, 78 - 8);
+  }
+
+  // Vault hold progress bar.
+  if (state.holdProgress > 0 && state.holdProgress < 1) {
+    ctx.fillStyle = 'rgba(8,10,24,0.7)';
+    ctx.fillRect(w / 2 - 150, 90, 300, 26);
+    ctx.fillStyle = '#c9a24f';
+    ctx.fillRect(w / 2 - 142, 98, 284 * clamp(state.holdProgress, 0, 1), 10);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('CRACKING THE VAULT…', w / 2, 96 - 8);
+    ctx.textAlign = 'left';
   }
 
   // Bottom-left: health, ammo, speed.
@@ -56,11 +95,21 @@ export function drawHUD(ctx, state, w, h) {
   ctx.fillStyle = '#e8ecff';
   ctx.font = 'bold 13px system-ui, sans-serif';
   ctx.fillText('HP ' + Math.ceil(pl.hp), 154, h - 37);
-  ctx.fillText(pl.vehicle ? 'Driving — E to exit' : 'Ammo ' + pl.ammo + '/12' + (pl.reloadT > 0 ? '  reloading…' : ''), 26, h - 20);
+  ctx.fillText(pl.vehicle ? 'Driving — E to exit · R radio' : 'Ammo ' + pl.ammo + '/12' + (pl.reloadT > 0 ? '  reloading…' : ''), 26, h - 20);
   if (pl.vehicle) {
     ctx.fillStyle = '#39d5ff';
     ctx.font = 'bold 20px system-ui, sans-serif';
     ctx.fillText(Math.round(Math.abs(pl.vehicle.speed) * 0.36) + ' km/h', 268, h - 37);
+    // Radio station, just above the minimap.
+    const st = currentStation(state);
+    ctx.fillStyle = 'rgba(8,10,24,0.62)';
+    ctx.fillRect(w - 268, h - 282, 254, 50);
+    ctx.fillStyle = '#ff4fd8';
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    ctx.fillText('♪ ' + st.name + ' ' + st.freq, w - 256, h - 262);
+    ctx.fillStyle = 'rgba(232,236,255,0.7)';
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillText('R / V — change station', w - 256, h - 244);
   }
 
   // Busted progress ring while a patrol car leans on the player.
@@ -104,7 +153,7 @@ export function drawHUD(ctx, state, w, h) {
   // Controls hint.
   ctx.fillStyle = 'rgba(232,236,255,0.55)';
   ctx.font = '12px system-ui, sans-serif';
-  ctx.fillText('WASD move/drive · E steal car · F punch · Click shoot · R reload · T taxi · P pause · M mute', 14, h - 72 - 4);
+  ctx.fillText('WASD move/drive · E steal car · F punch · Click shoot · R reload / radio in car · T taxi · P pause · M mute', 14, h - 72 - 4);
 
   drawObjectiveArrow(ctx, state, w, h);
 }
@@ -113,8 +162,8 @@ function drawObjectiveArrow(ctx, state, w, h) {
   const t = missionTarget(state);
   const taxi = state.taxi && state.taxi.active ? state.taxi : null;
   let tx = null, ty = null, color = '#ffd23e';
-  if (t) {
-    tx = t.boarded ? t.dx : t.px; ty = t.boarded ? t.dy : t.py; color = '#39d5ff';
+  if (taxi) {
+    tx = taxi.boarded ? taxi.dx : taxi.px; ty = taxi.boarded ? taxi.dy : taxi.py; color = '#39d5ff';
   } else if (t) {
     tx = t.x; ty = t.y;
   }
@@ -163,6 +212,9 @@ export function drawMinimap(ctx, state, w, h) {
   ctx.fillRect(mx, my, 300 * scale, 3900 * scale);
   ctx.fillStyle = '#e8cf8f';
   ctx.fillRect(mx + 1000 * scale, my + 3900 * scale, S - 1000 * scale, 650 * scale);
+  // Market plaza.
+  ctx.fillStyle = '#7dff5e';
+  ctx.fillRect(mx + 3560 * scale, my + 2760 * scale, 80 * scale, 80 * scale);
   // Roads.
   ctx.strokeStyle = '#565e6e';
   ctx.lineWidth = 2;
@@ -174,6 +226,10 @@ export function drawMinimap(ctx, state, w, h) {
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(mx + x * scale, my + y * scale, r, 0, Math.PI * 2); ctx.fill();
   };
+  // Uncollected neon packages.
+  if (state.packages) {
+    for (const pkg of state.packages) if (!pkg.taken) dot(pkg.x, pkg.y, '#39d5ff', 2);
+  }
   // Mission target.
   const t = missionTarget(state);
   if (t) {
@@ -232,15 +288,15 @@ export function drawMenus(ctx, state, w, h) {
     ctx.fillStyle = '#e8ecff';
     ctx.font = '17px system-ui, sans-serif';
     ctx.fillText('An original open-world crime story. Raka runs packages for Madame Lumen,', w / 2, h / 2 - 34);
-    ctx.fillText('steals cars, dodges the Neon Bay police — and chases one last boat out.', w / 2, h / 2 - 8);
+    ctx.fillText('steals cars, dodges the Neon Bay police — cracks a bank vault in the rain.', w / 2, h / 2 - 8);
     ctx.fillStyle = '#ffd23e';
     ctx.font = 'bold 15px system-ui, sans-serif';
-    ctx.fillText('WASD move / drive · E steal car · F punch · Click shoot · R reload · T taxi job · P pause · M mute', w / 2, h / 2 + 34);
+    ctx.fillText('WASD move / drive · E steal car · F punch · Click shoot · R reload / radio · T taxi · P pause · M mute', w / 2, h / 2 + 34);
     const pulse = 0.6 + Math.sin(state.time * 4) * 0.4;
     ctx.globalAlpha = pulse;
     ctx.fillStyle = '#7dff5e';
     ctx.font = 'bold 24px system-ui, sans-serif';
-    ctx.fillText(state.save ? 'CLICK TO CONTINUE — MISSION ' + (state.save.missionIdx + 1) + ' OF 4' : 'CLICK TO START', w / 2, h / 2 + 84);
+    ctx.fillText(state.save ? 'CLICK TO CONTINUE — MISSION ' + (state.save.missionIdx + 1) + ' OF 6' : 'CLICK TO START — 6 MISSIONS', w / 2, h / 2 + 84);
     ctx.globalAlpha = 1;
     ctx.fillStyle = 'rgba(232,236,255,0.6)';
     ctx.font = '13px system-ui, sans-serif';
@@ -254,8 +310,8 @@ export function drawMenus(ctx, state, w, h) {
     panel(ctx, w, h, 'WASTED', ['Raka went down in the streets of Neon Bay.', 'Madame Lumen is not impressed.'], '#ff5e5e', 'Press R or click to try again');
   } else if (state.mode === 'complete') {
     panel(ctx, w, h, 'NEON BAY IS YOURS', [
-      'All four missions done. The boat is gone, the money is yours,',
-      'and Madame Lumen owes you one.',
+      'All six missions done. The vault is empty, the boat is gone,',
+      'the money is yours, and Madame Lumen owes you one.',
       '',
       'Cash earned: $' + state.earned.toLocaleString('en-US'),
     ], '#7dff5e', 'Press Enter to keep roaming free');

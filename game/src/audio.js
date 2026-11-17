@@ -1,12 +1,17 @@
-// Synthesised sound for Neon Bay Nights: WebAudio only, no audio files.
-// Engine hum, two-tone sirens, gunshots, punches, pickups and a small
-// bassline loop. Everything is a no-op until the first user gesture unlocks
-// the AudioContext, and M mutes it.
+// Synthesised sound for Neon Bay Nights v3: WebAudio only, no audio files.
+// Engine hum, two-tone sirens, gunshots, punches, pickups and three radio
+// stations — NEON FM, BAY BEATS and HARBOR JAZZ — each with its own
+// bassline, lead line and tempo. Rain adds a soft patter on the roof.
+// Everything is a no-op until the first user gesture unlocks the
+// AudioContext, and M mutes it.
+
+import { STATIONS } from './radio.js';
 
 export function createAudio() {
   const audio = {
     ctx: null, muted: false, engineOsc: null, engineGain: null,
     musicNext: 0, musicStep: 0, sirenOn: false,
+    station: 0, rainNext: 0,
 
     init() {
       if (audio.ctx) {
@@ -32,6 +37,12 @@ export function createAudio() {
     },
 
     setMuted(m) { audio.muted = m; if (audio.engineGain) audio.engineGain.gain.value = 0; },
+
+    setStation(i) {
+      audio.station = i % STATIONS.length;
+      audio.musicStep = 0;
+      audio.musicNext = 0;
+    },
 
     tone(freq, dur, type, vol, slideTo) {
       if (!audio.ctx || audio.muted) return;
@@ -83,6 +94,8 @@ export function createAudio() {
         case 'thud': audio.noise(0.14, 0.2, 400); break;
         case 'reload': audio.tone(300, 0.05, 'square', 0.09); setTimeout(() => audio.tone(420, 0.05, 'square', 0.09), 120); break;
         case 'pickup': audio.tone(880, 0.09, 'sine', 0.14); setTimeout(() => audio.tone(1318, 0.14, 'sine', 0.14), 90); break;
+        case 'cash': [1046, 1318, 1568].forEach((f, i) => setTimeout(() => audio.tone(f, 0.12, 'sine', 0.13), i * 80)); break;
+        case 'vault': audio.tone(110, 0.4, 'sawtooth', 0.16, 55); audio.noise(0.4, 0.2, 300); break;
         case 'mission': [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => audio.tone(f, 0.16, 'triangle', 0.14), i * 110)); break;
         case 'siren': audio.tone(720, 0.5, 'sine', 0.07, 980); setTimeout(() => audio.tone(980, 0.5, 'sine', 0.07, 720), 500); break;
         case 'boom': audio.noise(0.7, 0.4, 300); audio.tone(90, 0.6, 'sine', 0.22, 35); break;
@@ -103,16 +116,29 @@ export function createAudio() {
 
     engineOff() { if (audio.engineGain) audio.engineGain.gain.value = 0; },
 
-    update(dt, playing) {
-      if (!audio.ctx || audio.muted || !playing) return;
+    update(dt, playing, rain) {
+      if (!audio.ctx || audio.muted) return;
+      // Rain patter on the roof, louder the harder it falls.
+      if (rain > 0.4 && playing) {
+        audio.rainNext -= dt;
+        if (audio.rainNext <= 0) {
+          audio.rainNext = 0.34;
+          audio.noise(0.18, 0.028 * rain, 3200);
+        }
+      }
+      if (!playing) return;
       audio.musicNext -= dt;
       if (audio.musicNext > 0) return;
-      audio.musicNext = 0.21;
-      const bass = [55, 0, 55, 65.4, 55, 0, 82.4, 73.4];
-      const note = bass[audio.musicStep % bass.length];
+      const st = STATIONS[audio.station % STATIONS.length];
+      audio.musicNext = st.tempo;
+      const bass = st.bass[audio.musicStep % st.bass.length];
+      if (bass) audio.tone(bass, st.tempo * 0.9, st.wave, 0.05);
+      if (audio.musicStep % 4 === 0) {
+        const lead = st.lead[(audio.musicStep / 4) % st.lead.length];
+        if (lead) audio.tone(lead, st.tempo * 1.6, 'sine', 0.035);
+      }
+      if (st.hat && audio.musicStep % 2 === 0) audio.noise(0.03, 0.02, 6000);
       audio.musicStep += 1;
-      if (note) audio.tone(note, 0.19, 'triangle', 0.05);
-      if (audio.musicStep % 4 === 0) audio.noise(0.03, 0.03, 6000);
     },
   };
   return audio;

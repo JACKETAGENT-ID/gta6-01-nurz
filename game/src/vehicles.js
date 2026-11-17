@@ -1,10 +1,13 @@
-// Vehicles: cars and motorbikes, traffic AI, stealing and driving.
+// Vehicles v3: cars, bus, van, motorbikes, traffic AI, stealing, driving.
 // Traffic cars stay on the road grid and turn at intersections; the player
-// can steal any of them with E, and every stolen car raises the wanted heat.
+// can steal any of them with E, and every stolen car raises the wanted
+// heat. Wet roads (rain) cut grip: slower acceleration, lazier steering.
+// At night the headlights throw two cones ahead of the car.
 
 import { clamp, angleDiff, dist2 } from './rng.js';
 import { collideBuildings, roadAxis, randomRoadPoint, WORLD } from './citymap.js';
 import { addHeat } from './police.js';
+import { isWet } from './weather.js';
 
 export const VEHICLE_TYPES = {
   sedan:  { w: 46, h: 22, top: 400, accel: 300, color: '#c94f4f' },
@@ -12,16 +15,19 @@ export const VEHICLE_TYPES = {
   truck:  { w: 62, h: 26, top: 320, accel: 220, color: '#7d8a99' },
   sport:  { w: 48, h: 22, top: 480, accel: 380, color: '#39d5ff' },
   bike:   { w: 34, h: 12, top: 460, accel: 360, color: '#ff4fd8' },
+  van:    { w: 56, h: 24, top: 340, accel: 240, color: '#b8a24f' },
+  bus:    { w: 86, h: 28, top: 280, accel: 170, color: '#e8a13c' },
 };
 const TRAFFIC_COLORS = ['#c94f4f', '#4f7dc9', '#e8e8e8', '#3a3f4a', '#7dc94f', '#c9a24f', '#8e44ad', '#b8bcc4'];
-const TRAFFIC_KINDS = ['sedan', 'sedan', 'sedan', 'taxi', 'truck', 'sport'];
+const TRAFFIC_KINDS = ['sedan', 'sedan', 'sedan', 'taxi', 'truck', 'sport', 'van', 'van', 'bus'];
 
 export function makeVehicle(rng, kind, x, y, angle) {
   const t = VEHICLE_TYPES[kind];
+  const color = kind === 'taxi' ? '#f2c230' : kind === 'bus' ? '#e8a13c' : rng.pick(TRAFFIC_COLORS);
   return {
     kind, x, y, angle, speed: 0, hp: 100,
     w: t.w, h: t.h, top: t.top, accel: t.accel,
-    color: kind === 'taxi' ? '#f2c230' : rng.pick(TRAFFIC_COLORS),
+    color,
     driver: 'traffic', axis: 'v', dir: 1, lane: 18,
     stuck: 0, honk: 0,
   };
@@ -38,16 +44,24 @@ export function spawnTraffic(state) {
     v.axis = axis; v.dir = dir;
     if (axis === 'v') v.x = Math.round(p.x / 400) * 400 + dir * 18;
     else v.y = Math.round(p.y / 400) * 400 + dir * 18;
-    v.speed = rng.range(90, 150);
+    v.speed = rng.range(80, 140);
     state.vehicles.push(v);
   }
-  // A few parked cars and two motorbikes waiting to be borrowed.
+  // Parked cars, a van, a city bus and two motorbikes waiting to be borrowed.
   for (let i = 0; i < 6; i++) {
     const p = randomRoadPoint(city, rng);
     const v = makeVehicle(rng, 'sedan', p.x + rng.range(-40, 40), p.y + rng.range(-40, 40), rng.angle());
     v.driver = null; v.speed = 0;
     state.vehicles.push(v);
   }
+  const vanSpot = randomRoadPoint(city, rng, 'market');
+  const van = makeVehicle(rng, 'van', vanSpot.x, vanSpot.y, rng.angle());
+  van.driver = null; van.speed = 0;
+  state.vehicles.push(van);
+  const busSpot = randomRoadPoint(city, rng, 'downtown');
+  const bus = makeVehicle(rng, 'bus', busSpot.x, busSpot.y, rng.angle());
+  bus.driver = null; bus.speed = 0;
+  state.vehicles.push(bus);
   for (let i = 0; i < 2; i++) {
     const p = randomRoadPoint(city, rng, 'downtown');
     const v = makeVehicle(rng, 'bike', p.x, p.y, rng.angle());
@@ -71,11 +85,13 @@ function nearestAhead(state, v, range) {
 }
 
 export function updateTraffic(state, dt) {
+  const wet = isWet(state);
   for (const v of state.vehicles) {
     if (v.driver !== 'traffic') continue;
-    // Slow down for the car ahead.
+    // Slow down for the car ahead; slower still on wet roads.
     const ahead = nearestAhead(state, v, 110);
-    const target = ahead ? Math.max(0, ahead.v.speed - 20) : v.top * 0.38;
+    const cruise = v.top * (wet ? 0.32 : 0.38);
+    const target = ahead ? Math.max(0, ahead.v.speed - 20) : cruise;
     v.speed += clamp(target - v.speed, -260 * dt, 160 * dt);
     const step = v.speed * dt;
     if (v.axis === 'v') v.y += v.dir * step; else v.x += v.dir * step;
@@ -119,12 +135,15 @@ export function tryEnterVehicle(state) {
   if (!v) return false;
   if (v.driver === 'traffic') {
     // Yank the driver out: they flee on foot, and the law notices.
-    state.peds.push({ x: v.x + 30, y: v.y + 30, angle: state.rng.angle(), speed: 130,
-      color: '#e8b04d', mode: 'flee', down: 0, panic: 3 });
+    state.peds.push({
+      x: v.x + 30, y: v.y + 30, angle: state.rng.angle(), speed: 130,
+      color: '#e8b04d', mode: 'flee', down: 0, panic: 3, kind: 'local', target: null,
+    });
     v.driver = 'player';
     addHeat(state, 1);
     state.audio.sfx('steal');
-    state.hudFlash = 'Car jacked! The driver ran off — the cops noticed.';
+    state.hudFlash = v.kind === 'bus' ? 'Bus jacked! A whole busload of witnesses called it in.'
+      : 'Car jacked! The driver ran off — the cops noticed.';
   } else {
     v.driver = 'player';
     addHeat(state, 0.6);
@@ -156,18 +175,22 @@ export function updatePlayerDriving(state, dt) {
   const left = k.has('KeyA') || k.has('ArrowLeft');
   const right = k.has('KeyD') || k.has('ArrowRight');
   const handbrake = k.has('Space');
+  const wet = isWet(state);
+  const grip = wet ? 0.9 : 1;
 
-  if (up) v.speed += v.accel * dt;
-  else if (down) v.speed -= v.accel * 0.8 * dt;
+  const accel = v.accel * (wet ? 0.92 : 1);
+  if (up) v.speed += accel * dt;
+  else if (down) v.speed -= accel * 0.8 * dt;
   else v.speed -= Math.sign(v.speed) * 130 * dt;
   if (handbrake) v.speed -= Math.sign(v.speed) * 420 * dt;
   v.speed = clamp(v.speed, -v.top * 0.45, v.top);
 
   const steer = (left ? -1 : 0) + (right ? 1 : 0);
-  const turnRate = 2.1 * clamp(Math.abs(v.speed) / 180, 0, 1) * Math.sign(v.speed || 1);
+  const turnRate = 2.1 * clamp(Math.abs(v.speed) / 180, 0, 1) * Math.sign(v.speed || 1) * grip;
   v.angle += steer * turnRate * dt * (handbrake ? 1.5 : 1);
   if (handbrake && Math.abs(v.speed) > 120 && steer !== 0) {
     state.skids.push({ x: v.x, y: v.y, angle: v.angle, life: 1.6 });
+    state.smoke.push({ x: v.x - Math.cos(v.angle) * v.w / 2, y: v.y - Math.sin(v.angle) * v.w / 2, life: 0.9, r: 12 });
   }
 
   const nx = v.x + Math.cos(v.angle) * v.speed * dt;
@@ -178,6 +201,7 @@ export function updatePlayerDriving(state, dt) {
     v.speed *= -0.25;
     state.audio.sfx('crash');
     state.shake = Math.min(10, state.shake + 5);
+    state.particles.push({ x: v.x, y: v.y, kind: 'spark', life: 0.35, n: 8 });
     if (Math.abs(v.speed) > 90) addHeat(state, 0.2);
   } else {
     v.x = nx; v.y = ny;
@@ -205,6 +229,19 @@ export function updatePlayerDriving(state, dt) {
   state.audio.engine(Math.abs(v.speed) / v.top, v.kind === 'bike');
 }
 
+function drawHeadlights(ctx, v) {
+  // Two beams plus a soft halo at the nose.
+  for (const off of [-7, 7]) {
+    const g = ctx.createRadialGradient(v.w / 2 + 60, off, 4, v.w / 2 + 60, off, 110);
+    g.addColorStop(0, 'rgba(255,240,180,0.6)'); g.addColorStop(1, 'rgba(255,240,180,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.moveTo(v.w / 2, off - 4); ctx.lineTo(v.w / 2 + 130, off - 30); ctx.lineTo(v.w / 2 + 130, off + 30); ctx.lineTo(v.w / 2, off + 4); ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,244,190,0.9)';
+  ctx.fillRect(v.w / 2 - 2, -9, 4, 4);
+  ctx.fillRect(v.w / 2 - 2, 5, 4, 4);
+}
+
 function drawOneVehicle(ctx, v, night, time) {
   ctx.save();
   ctx.translate(v.x, v.y);
@@ -218,11 +255,32 @@ function drawOneVehicle(ctx, v, night, time) {
     ctx.beginPath(); ctx.arc(-v.w / 2 + 4, 0, 5, 0, Math.PI * 2); ctx.arc(v.w / 2 - 4, 0, 5, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#e8b04d';
     ctx.beginPath(); ctx.arc(-2, 0, 5, 0, Math.PI * 2); ctx.fill();
+  } else if (v.kind === 'bus') {
+    ctx.fillStyle = v.color;
+    ctx.beginPath(); ctx.roundRect(-v.w / 2, -v.h / 2, v.w, v.h, 8); ctx.fill();
+    ctx.fillStyle = '#1c2733';
+    for (let i = 0; i < 5; i++) ctx.fillRect(-v.w / 2 + 8 + i * 15, -v.h / 2 + 4, 11, v.h - 8);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(-v.w / 2 + 6, -v.h / 2 + 3, v.w - 12, 3);
+    ctx.fillStyle = '#111'; ctx.font = 'bold 9px system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('CITY BUS', 0, 3);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-v.w / 2 + 4, -v.h / 2 - 2, 9, 4); ctx.fillRect(-v.w / 2 + 4, v.h / 2 - 2, 9, 4);
+    ctx.fillRect(v.w / 2 - 13, -v.h / 2 - 2, 9, 4); ctx.fillRect(v.w / 2 - 13, v.h / 2 - 2, 9, 4);
+  } else if (v.kind === 'van') {
+    ctx.fillStyle = v.color;
+    ctx.beginPath(); ctx.roundRect(-v.w / 2, -v.h / 2, v.w, v.h, 7); ctx.fill();
+    ctx.fillStyle = '#1c2733';
+    ctx.fillRect(-v.w / 6, -v.h / 2 + 3, v.w / 4, v.h - 6);
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(v.w / 6, -v.h / 2 + 2); ctx.lineTo(v.w / 6, v.h / 2 - 2); ctx.stroke();
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-v.w / 2 + 2, -v.h / 2 - 2, 8, 4); ctx.fillRect(-v.w / 2 + 2, v.h / 2 - 2, 8, 4);
+    ctx.fillRect(v.w / 2 - 10, -v.h / 2 - 2, 8, 4); ctx.fillRect(v.w / 2 - 10, v.h / 2 - 2, 8, 4);
   } else {
     ctx.fillStyle = v.color;
     ctx.beginPath();
-    const r = 7;
-    ctx.roundRect(-v.w / 2, -v.h / 2, v.w, v.h, r);
+    ctx.roundRect(-v.w / 2, -v.h / 2, v.w, v.h, 7);
     ctx.fill();
     ctx.fillStyle = '#1c2733';
     ctx.fillRect(-v.w / 6, -v.h / 2 + 3, v.w / 3, v.h - 6);
@@ -235,13 +293,13 @@ function drawOneVehicle(ctx, v, night, time) {
       ctx.fillStyle = '#111'; ctx.font = 'bold 8px system-ui, sans-serif'; ctx.textAlign = 'center';
       ctx.fillText('TAXI', 0, 3);
     }
-    if (night) {
-      const g = ctx.createRadialGradient(v.w / 2 + 30, 0, 4, v.w / 2 + 30, 0, 90);
-      g.addColorStop(0, 'rgba(255,240,180,0.55)'); g.addColorStop(1, 'rgba(255,240,180,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.moveTo(v.w / 2, -8); ctx.lineTo(v.w / 2 + 110, -34); ctx.lineTo(v.w / 2 + 110, 34); ctx.lineTo(v.w / 2, 8); ctx.closePath(); ctx.fill();
+    if (v.kind === 'sport') {
+      // Rear spoiler.
+      ctx.fillStyle = '#111';
+      ctx.fillRect(-v.w / 2 - 3, -v.h / 2 - 1, 4, v.h + 2);
     }
   }
+  if (night) drawHeadlights(ctx, v);
   ctx.restore();
   void time;
 }

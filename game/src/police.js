@@ -1,9 +1,11 @@
-// Wanted system and the Neon Bay police.
+// Wanted system and the Neon Bay police v3.
 // Heat rises with crimes and slowly cools off. Wanted stars 0-5 follow the
-// heat; patrol cars spawn, chase and ram, and at 3+ stars they set roadblocks
-// across the road ahead of the player. Get caught on foot and it is over.
+// heat; patrol cars spawn, chase and ram, and at 3+ stars they set
+// roadblocks across the road ahead of the player. At 4+ stars an
+// interceptor joins the chase — faster, meaner, harder to shake.
+// Get caught on foot and it is over.
 
-import { clamp, angleDiff } from './rng.js';
+import { clamp, angleDiff, turnToward } from './rng.js';
 import { randomRoadPoint, WORLD } from './citymap.js';
 import { scarePeds } from './walkers.js';
 
@@ -22,22 +24,28 @@ export function addHeat(state, amount) {
   state.lastCrime = state.time;
 }
 
-export function spawnPolice(state) {
-  const p = randomRoadPoint(state.city, state.rng);
+function makeCop(state, interceptor) {
   const pl = state.player;
-  // Spawn on a road 350-600 px away from the player.
   const a = state.rng.angle();
   const x = clamp(pl.x + Math.cos(a) * 480, 200, WORLD - 200);
   const y = clamp(pl.y + Math.sin(a) * 480, 200, WORLD - 200);
-  const cop = {
-    kind: 'police', x, y, angle: Math.atan2(pl.y - y, pl.x - x),
-    speed: 0, hp: 100, w: 48, h: 22, top: 430, accel: 360,
+  return {
+    kind: interceptor ? 'interceptor' : 'police', x, y,
+    angle: Math.atan2(pl.y - y, pl.x - x),
+    speed: 0, hp: 100, w: 48, h: 22,
+    top: interceptor ? 470 : 430, accel: interceptor ? 410 : 360,
     color: '#1c2733', driver: 'police', axis: 'v', dir: 1,
     bustTimer: 0, siren: state.rng.range(0, 1),
   };
-  void p;
+}
+
+export function spawnPolice(state) {
+  const interceptor = state.wanted >= 4 && state.police.filter((c) => c.kind === 'interceptor').length === 0;
+  const cop = makeCop(state, interceptor);
   state.police.push(cop);
   state.audio.sfx('siren');
+  if (interceptor) state.hudFlash = 'Interceptor on your tail — lose it fast!';
+  void randomRoadPoint;
 }
 
 export function updatePolice(state, dt) {
@@ -55,7 +63,7 @@ export function updatePolice(state, dt) {
   // Roadblocks at 3+ stars: two patrol cars parked across the road ahead.
   state.roadblockTimer = (state.roadblockTimer || 0) - dt;
   if (want >= 3 && state.roadblockTimer <= 0 && state.roadblocks.length < 2) {
-    const a = pl.vehicle ? pl.angle : pl.angle;
+    const a = pl.angle;
     const bx = pl.x + Math.cos(a) * 520, by = pl.y + Math.sin(a) * 520;
     if (bx > 200 && bx < WORLD - 200 && by > 200 && by < WORLD - 200) {
       for (const off of [-40, 40]) {
@@ -80,8 +88,7 @@ export function updatePolice(state, dt) {
     const dx = pl.x - c.x, dy = pl.y - c.y;
     const d = Math.hypot(dx, dy);
     const targetAngle = Math.atan2(dy, dx);
-    const diff = angleDiff(c.angle, targetAngle);
-    c.angle += clamp(diff, -2.6 * dt, 2.6 * dt);
+    c.angle = turnToward(c.angle, targetAngle, 2.6 * dt);
     const wantSpeed = d > 260 ? c.top : c.top * 0.55;
     c.speed += clamp(wantSpeed - c.speed, -300 * dt, 320 * dt);
     c.x += Math.cos(c.angle) * c.speed * dt;
@@ -97,6 +104,7 @@ export function updatePolice(state, dt) {
         state.audio.sfx('crash');
         if (pl.vehicle.hp <= 0) {
           state.particles.push({ x: pl.vehicle.x, y: pl.vehicle.y, kind: 'boom', life: 1, n: 26 });
+          state.smoke.push({ x: pl.vehicle.x, y: pl.vehicle.y, life: 1.4, r: 26 });
           state.audio.sfx('boom');
           pl.vehicle.hp = 0;
           const v = pl.vehicle;
@@ -126,25 +134,36 @@ export function updatePolice(state, dt) {
   if (!state.police.some((c) => Math.hypot(pl.x - c.x, pl.y - c.y) < 70)) state.bustProgress = 0;
 }
 
-export function drawPolice(ctx, state) {
-  for (const c of state.police) {
-    ctx.save();
-    ctx.translate(c.x, c.y);
-    ctx.rotate(c.angle);
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(-c.w / 2 + 4, -c.h / 2 + 5, c.w, c.h);
-    ctx.fillStyle = '#f2f2f2';
-    ctx.beginPath(); ctx.roundRect(-c.w / 2, -c.h / 2, c.w, c.h, 7); ctx.fill();
-    ctx.fillStyle = '#1c2733';
-    ctx.fillRect(-c.w / 2, -c.h / 2 + 4, c.w / 2.4, c.h - 8);
-    ctx.fillStyle = '#1c2733';
-    ctx.fillRect(-c.w / 6, -c.h / 2 + 3, c.w / 3, c.h - 6);
-    // Flashing light bar.
-    const phase = Math.floor(c.siren * 6) % 2 === 0;
-    ctx.fillStyle = phase ? '#ff2d2d' : '#2d7dff';
-    ctx.fillRect(-8, -c.h / 2 - 2, 16, 5);
-    ctx.restore();
+function drawCopCar(ctx, c, time) {
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.rotate(c.angle);
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(-c.w / 2 + 4, -c.h / 2 + 5, c.w, c.h);
+  const interceptor = c.kind === 'interceptor';
+  ctx.fillStyle = interceptor ? '#151515' : '#f2f2f2';
+  ctx.beginPath(); ctx.roundRect(-c.w / 2, -c.h / 2, c.w, c.h, 7); ctx.fill();
+  ctx.fillStyle = '#1c2733';
+  ctx.fillRect(-c.w / 2, -c.h / 2 + 4, c.w / 2.4, c.h - 8);
+  ctx.fillStyle = '#1c2733';
+  ctx.fillRect(-c.w / 6, -c.h / 2 + 3, c.w / 3, c.h - 6);
+  if (interceptor) {
+    // Spoiler and racing stripe.
+    ctx.fillStyle = '#ff2d2d';
+    ctx.fillRect(-c.w / 2 - 2, -c.h / 2, 3, c.h);
+    ctx.fillStyle = 'rgba(255,45,45,0.8)';
+    ctx.fillRect(-c.w / 2 + 6, -2, c.w - 12, 4);
   }
+  // Flashing light bar.
+  const phase = Math.floor(c.siren * 6) % 2 === 0;
+  ctx.fillStyle = phase ? '#ff2d2d' : '#2d7dff';
+  ctx.fillRect(-8, -c.h / 2 - 2, 16, 5);
+  ctx.restore();
+  void time;
+}
+
+export function drawPolice(ctx, state) {
+  for (const c of state.police) drawCopCar(ctx, c, state.time);
   for (const r of state.roadblocks) {
     ctx.save();
     ctx.translate(r.x, r.y);
@@ -156,6 +175,13 @@ export function drawPolice(ctx, state) {
     const phase = Math.floor(state.time * 6) % 2 === 0;
     ctx.fillStyle = phase ? '#ff2d2d' : '#2d7dff';
     ctx.fillRect(-8, -13, 16, 5);
+    // Spike strip teeth on the road in front of the block.
+    ctx.fillStyle = '#c9a24f';
+    for (let k = -2; k <= 2; k++) {
+      ctx.beginPath();
+      ctx.moveTo(18 + k * 8, -8); ctx.lineTo(24 + k * 8, 0); ctx.lineTo(18 + k * 8, 8);
+      ctx.closePath(); ctx.fill();
+    }
     ctx.restore();
   }
 }
