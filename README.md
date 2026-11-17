@@ -4,58 +4,74 @@
 
 # Neon Bay Nights
 
-An original open-world crime game in the spirit of GTA 6, built for the
-[make.fun gta6-01 bounty](https://make.fun/c/gta6-01). You are **Raka**, a
-courier for **Madame Lumen**, fixer of the fictional neon city of **Neon Bay**.
-Steal cars, outrun the Neon Bay Police, and finish three story jobs to own
-the night. Everything — the city, the characters, the story, the art and the
-sounds — is invented here. No Rockstar / GTA names, art, music or maps.
+An original open-world crime game for the make.fun **gta6-01** bounty — a
+fictional neon city, built in vanilla JavaScript with no libraries, no
+downloads and no network requests. Every name, character, place, story beat
+and sound is our own; nothing comes from Rockstar Games or any other
+commercial game.
 
 ## The game
 
-- **A city to explore** on foot and by car: a 13×13-block neon grid with
-  traffic, pedestrians, parks, cash pickups and a safehouse.
-- **Cars to steal and drive**: press E next to any street car. Stealing one
-  raises your wanted level.
-- **Wanted level + police**: 5 stars of heat. Patrol cars chase, ram and try
-  to bust you on foot. Lie low and the heat cools off.
-- **Missions + story**: three jobs in a row — *Neon Package* (pick up and
-  deliver), *Chase the Shadow* (tail the orange coupe), *The Big Escape*
-  (survive 45 seconds at 3 stars, then reach the safehouse).
-- **Combat**: punch (F) and a pistol (mouse / Space, R to reload).
-- **HUD + minimap**, start screen, pause, game over / busted / story-complete
-  screens, and autosave to localStorage after every finished job.
-- **Sound**: everything is synthesised live with WebAudio — engine hum,
-  two-tone sirens, gunshots, jingles. No audio files.
-- **Controls**: WASD / arrows to move and drive, E enter/steal a car,
-  F punch, mouse / Space shoot, R reload, P pause, M mute.
+You are **Raka**, a courier for **Madame Lumen**, who runs the Neon Bay night
+scene. Four story missions take you across the city:
 
-## How to run it
+1. **Neon Package** — pick up a glowing case at the Old Docks warehouse and
+   deliver it to Lumen's Lounge downtown.
+2. **Harbor Heist** — steal a cargo crate from the container yard and stash
+   it at the hideout while the harbour patrol closes in.
+3. **Chase the Shadow** — tail a grey shadow car without spooking it, then
+   cut it off at the north plaza.
+4. **The Big Escape** — outrun a four-star police response, roadblocks and
+   all, to the boat on Coral Beach.
+
+Between missions the city is yours: steal cars and motorbikes, take taxi
+side-jobs (press **T**), and watch the wanted heat rise — and slowly cool
+off — as the Neon Bay police chase, ram and set roadblocks. Day turns to
+night on a five-minute cycle; at night the neon signs glow and your
+headlights cut the dark.
+
+## Controls
+
+- **WASD / arrows** — walk or drive (Shift to run)
+- **Mouse** — aim · **Click** — shoot · **F** — punch · **R** — reload
+- **E** — steal / enter / exit a car or motorbike · **Space** — handbrake
+- **T** — taxi side-job · **P** — pause · **M** — mute
+
+Progress (cash and mission) saves to localStorage automatically.
+
+## Play it
 
 ```sh
 node serve.ts
-# open http://localhost:8080 in desktop Chrome
+# open http://localhost:8080
 ```
-
-No build step, no network request: `game/` is plain static files.
 
 ## Screenshots
 
-The four images in `screenshots/` are real renders of the game, staged
-deterministically with `?shot=start|play|chase|mission&seed=1` (see
-`shots.json` and `game/src/shots.js`). The first, `1-chase.jpg`, is the cover:
-a police chase with the wanted level, the minimap and a mission objective
-on the HUD.
+The game supports deterministic staging for screenshots:
+`?shot=start|play|chase|mission&seed=1` — see `shots.json`.
 
-## Layout
+## Structure
 
-- `game/index.html` — the page; `game/src/` — the source, one clear job per
-  file (`city.js`, `traffic.js`, `police.js`, `missions.js`, `combat.js`,
-  `hud.js`, `audio.js`, `input.js`, `save.js`, `shots.js`, `main.js`).
-- `main.ts` — the entrypoint: copies `game/` and `screenshots/` to `/output`
-  and writes `dossier.json` with the vendored make.fun library.
-- `vendor/makefun-game.ts` — the kit's library, unchanged.
+- `game/index.html` — canvas page, loads `src/boot.js`
+- `game/src/boot.js` — entry point, reads `?shot=` / `?seed=`
+- `game/src/engine.js` — game state, main loop, camera, rendering glue
+- `game/src/citymap.js` — Neon Bay: Downtown, Old Docks, Coral Beach
+- `game/src/vehicles.js` — cars, motorbikes, traffic AI, stealing, driving
+- `game/src/walkers.js` — pedestrians
+- `game/src/police.js` — wanted heat, patrol cars, roadblocks
+- `game/src/combat.js` — fists, pistol, reload, bullets, particles
+- `game/src/story.js` — four missions and the taxi side-job
+- `game/src/daynight.js` — day/night cycle and headlights
+- `game/src/audio.js` — synthesised WebAudio sound and music
+- `game/src/hud.js` — HUD, minimap, objective arrow, menus
+- `game/src/savegame.js` — localStorage saves
+- `game/src/controls.js` — keyboard and mouse input
+- `game/src/shots.js` — deterministic screenshot staging
+- `game/src/rng.js` — seeded random numbers
+- `main.ts` — entry program: copies the game and screenshots to `/output`
+  and writes `dossier.json` with the vendored make.fun library
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see `LICENSE`.
